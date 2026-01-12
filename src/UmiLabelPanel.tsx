@@ -36,7 +36,7 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
   const [segments, setSegments] = useState<Segment[]>(() => initial.segments ?? []);
 
   // ✅ promptText 定义在这里（之前缺失导致 End 直接报错）
-  const [promptText, setPromptText] = useState<string>(initial.promptText ?? "");
+  const [promptText, setPromptText] = useState<string>(initial.promptText ?? "pick the bottle and put into the box");
 
   const [renderDone, setRenderDone] = useState<(() => void) | undefined>();
   const [status, setStatus] = useState<string>("");
@@ -526,7 +526,7 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
 
   return (
     <div style={{ padding: 12, fontFamily: "sans-serif", pointerEvents: "auto" }}>
-      <h2 style={{ margin: "0 0 8px" }}>Umi Crop Labeler</h2>
+      <h2 style={{ margin: "0 0 8px" }}>Umi Crop</h2>
 
       <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10 }}>
         <div style={{ padding: "2px 8px", border: "1px solid #ccc", borderRadius: 6 }}>

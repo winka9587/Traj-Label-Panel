@@ -2,70 +2,81 @@ import { Immutable, MessageEvent, PanelExtensionContext, Time, Topic } from "@li
 import React, { ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
+// task config
+import taskConfigJson from "./task_config.json";
+
 /** ===== Types ===== */
-type Segment = { startSec: number; endSec: number; prompt: string };
+type SubtaskDef = { id: string; name?: string; prompt: string };
+type TaskDef = { id: string; name: string; prompt: string; subtasks?: SubtaskDef[] };
+type TaskConfig = { version: number; tasks: TaskDef[] };
+
+type SubSegment = { subtaskId: string; name?: string; startSec: number; endSec: number; prompt: string };
+
+type Segment = {
+  startSec: number;
+  endSec: number;
+  prompt: string;
+
+  taskId?: string;
+
+  // internal cut points (length = numSubtasks-1), draggable
+  cutsSec?: number[];
+};
+
 type SegmentRow = Segment & { id: string };
 
 type PanelState = {
-  segments: Segment[]; // persisted without id
+  segments: Segment[];
   pendingStartSec?: number;
+  pendingCutsSec?: number[]; // NEW: next_cut workflow
   promptText?: string;
 
-  // timeline window settings
   windowSec?: number;
   followCursor?: boolean;
   windowCenterSec?: number;
 
-  // NEW
   outputDir?: string;
+  selectedTaskId?: string;
 };
 
-type DragHandle = "start" | "end";
-type DragState = { segId: string; handle: DragHandle } | null;
+type DragState =
+  | { segId: string; kind: "start" }
+  | { segId: string; kind: "end" }
+  | { segId: string; kind: "cut"; cutIndex: number }
+  | null;
 
 const EPS = 1e-3;
 
+/** ===== Utils ===== */
 function toSec(t: Time | undefined): number | undefined {
   if (!t) return undefined;
   if (typeof t.sec === "number" && typeof t.nsec === "number") return t.sec + t.nsec * 1e-9;
   return undefined;
 }
-
 function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
 }
-
-// allow touching boundaries: aEnd==bStart ok
 function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number) {
   return aStart < bEnd - EPS && aEnd > bStart + EPS;
 }
-
+function newId() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 function normalizeSegment(s: Segment): Segment {
   const start = Math.min(s.startSec, s.endSec);
   const end = Math.max(s.startSec, s.endSec);
-  return { ...s, startSec: start, endSec: end };
+  const cuts = (s.cutsSec ?? []).slice().sort((a, b) => a - b);
+  return { ...s, startSec: start, endSec: end, cutsSec: cuts };
 }
-
 function normalizeRow(r: SegmentRow): SegmentRow {
   const s = normalizeSegment(r);
   return { ...s, id: r.id };
 }
 
-function newId() {
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-/** Try to derive a recording base name (without extension) from panel context.
- *  This is best-effort because not all data sources expose a filename.
- */
 function getRecordingBaseName(context: PanelExtensionContext): string | undefined {
   const anyCtx = context as unknown as Record<string, unknown>;
-
-  // Helper to safely extract string fields
   const pickString = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 
-  // common candidates (best effort)
-  // 1) context.dataSource?.name / .id / .fileName etc
   const dataSource = anyCtx["dataSource"] as Record<string, unknown> | undefined;
   const dsName =
     pickString(dataSource?.["name"]) ||
@@ -73,7 +84,6 @@ function getRecordingBaseName(context: PanelExtensionContext): string | undefine
     pickString(dataSource?.["filename"]) ||
     pickString(dataSource?.["id"]);
 
-  // 2) context.playerState?.name / context.playbackState?.name etc
   const playerState = anyCtx["playerState"] as Record<string, unknown> | undefined;
   const psName =
     pickString(playerState?.["name"]) ||
@@ -81,20 +91,17 @@ function getRecordingBaseName(context: PanelExtensionContext): string | undefine
     pickString(playerState?.["filename"]) ||
     pickString(playerState?.["id"]);
 
-  // 3) context?.title
   const title = pickString(anyCtx["title"]);
 
   const raw = dsName || psName || title;
   if (!raw) return undefined;
 
-  // normalize: remove path + extension
   const last = raw.split(/[\\/]/).pop() ?? raw;
   const noExt = last.replace(/\.(mcap|bag|db3|json|log)$/i, "");
   return noExt || undefined;
 }
 
 function safeFilename(s: string) {
-  // keep it simple, avoid weird chars
   return s.replace(/[^\w.\-]+/g, "_");
 }
 
@@ -108,57 +115,125 @@ function downloadJson(filename: string, obj: unknown) {
   URL.revokeObjectURL(url);
 }
 
+/** equal init cuts (nSubtasks => nSubtasks-1 cuts) */
+function initCuts(startSec: number, endSec: number, nSubtasks: number): number[] {
+  const nCuts = Math.max(nSubtasks - 1, 0);
+  if (nCuts <= 0) return [];
+  const dur = Math.max(endSec - startSec, 0);
+  if (dur < EPS) return [];
+  const step = dur / nSubtasks;
+  const cuts: number[] = [];
+  for (let i = 1; i <= nCuts; i++) cuts.push(startSec + step * i);
+  return cuts;
+}
+
+/** keep cut relative positions when start/end changes */
+function remapCutsByRatio(oldStart: number, oldEnd: number, newStart: number, newEnd: number, cuts: number[]): number[] {
+  const oldDur = Math.max(oldEnd - oldStart, EPS);
+  const newDur = Math.max(newEnd - newStart, 0);
+  if (newDur < EPS) return [];
+  const us = cuts.map((c) => (c - oldStart) / oldDur);
+  const mapped = us.map((u) => newStart + u * newDur);
+  return mapped.slice().sort((a, b) => a - b);
+}
+
+/** derive subtasks from cuts and task defs */
+function buildSubtasksFromCuts(seg: SegmentRow, task?: TaskDef): SubSegment[] {
+  const defs = task?.subtasks ?? [];
+  if (!defs.length) return [];
+
+  const start = seg.startSec;
+  const end = seg.endSec;
+  const cuts = (seg.cutsSec ?? []).slice().sort((a, b) => a - b);
+
+  if (cuts.length !== defs.length - 1) {
+    const fixed = initCuts(start, end, defs.length);
+    cuts.splice(0, cuts.length, ...fixed);
+  }
+
+  const bounds = [start, ...cuts, end];
+  const out: SubSegment[] = [];
+  for (let i = 0; i < defs.length; i++) {
+    out.push({
+      subtaskId: defs[i]!.id,
+      name: defs[i]!.name,
+      startSec: bounds[i]!,
+      endSec: bounds[i + 1]!,
+      prompt: defs[i]!.prompt,
+    });
+  }
+  return out;
+}
+
+/** colors for cut points */
+const CUT_COLORS = ["#2ecc71", "#f39c12", "#9b59b6", "#1abc9c", "#e67e22", "#3498db", "#e74c3c"];
+
 /** ===== Panel ===== */
 function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactElement {
   const initial = (context.initialState as Partial<PanelState> | undefined) ?? {};
+
+  const taskConfig = taskConfigJson as unknown as TaskConfig;
+  const defaultTaskId = taskConfig.tasks[0]?.id ?? "";
 
   const [topics, setTopics] = useState<undefined | Immutable<Topic[]>>();
   const [messages, setMessages] = useState<undefined | Immutable<MessageEvent[]>>();
 
   const [currentTimeSec, setCurrentTimeSec] = useState<number | undefined>(undefined);
+
+  // pending (next_cut workflow)
   const [pendingStartSec, setPendingStartSec] = useState<number | undefined>(initial.pendingStartSec);
+  const [pendingCutsSec, setPendingCutsSec] = useState<number[]>(initial.pendingCutsSec ?? []);
 
   const [segments, setSegments] = useState<SegmentRow[]>(() => {
     const base = (initial.segments ?? []).map(normalizeSegment);
     return base.map((s) => ({ ...s, id: newId() }));
   });
 
-  // 1) prompt default value
-  const [promptText, setPromptText] = useState<string>(initial.promptText ?? "pick the bottle and put into the box");
+  const [selectedTaskId, setSelectedTaskId] = useState<string>(initial.selectedTaskId ?? defaultTaskId);
+  const selectedTask = useMemo(() => {
+    return taskConfig.tasks.find((t) => t.id === selectedTaskId) ?? taskConfig.tasks[0];
+  }, [taskConfig.tasks, selectedTaskId]);
+
+  const [promptText, setPromptText] = useState<string>(
+    initial.promptText ?? selectedTask?.prompt ?? "pick the bottle and put into the box",
+  );
 
   const [status, setStatus] = useState<string>("");
   const [renderDone, setRenderDone] = useState<(() => void) | undefined>();
 
-  // fixed preview window
   const [windowSec, setWindowSec] = useState<number>(initial.windowSec ?? 30);
   const [followCursor, setFollowCursor] = useState<boolean>(initial.followCursor ?? true);
   const [windowCenterSec, setWindowCenterSec] = useState<number | undefined>(initial.windowCenterSec);
 
-  // 2) output path input w/ default
   const [outputDir, setOutputDir] = useState<string>(initial.outputDir ?? "/data/label_data/seg");
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<DragState>(null);
 
-  // table scroll refs
-  const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
+  // update prompt on task change (optional)
+  useEffect(() => {
+    if (selectedTask?.prompt) setPromptText(selectedTask.prompt);
+  }, [selectedTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // persist (strip id)
+  // persist
   useEffect(() => {
     const plain: Segment[] = segments.map((r) => {
       const n = normalizeRow(r);
-      return { startSec: n.startSec, endSec: n.endSec, prompt: n.prompt };
+      return { startSec: n.startSec, endSec: n.endSec, prompt: n.prompt, taskId: n.taskId, cutsSec: n.cutsSec };
     });
+
     context.saveState({
       segments: plain,
       pendingStartSec,
+      pendingCutsSec,
       promptText,
       windowSec,
       followCursor,
       windowCenterSec,
       outputDir,
+      selectedTaskId,
     } satisfies PanelState);
-  }, [context, segments, pendingStartSec, promptText, windowSec, followCursor, windowCenterSec, outputDir]);
+  }, [context, segments, pendingStartSec, pendingCutsSec, promptText, windowSec, followCursor, windowCenterSec, outputDir, selectedTaskId]);
 
   useLayoutEffect(() => {
     context.onRender = (renderState, done) => {
@@ -179,16 +254,10 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
   const canSeek = typeof context.seekPlayback === "function";
   const seekTo = (t: number) => context.seekPlayback?.(t);
 
-  const timeText = useMemo(
-    () => (currentTimeSec == null ? "n/a" : `${currentTimeSec.toFixed(3)} s`),
-    [currentTimeSec],
-  );
+  const timeText = useMemo(() => (currentTimeSec == null ? "n/a" : `${currentTimeSec.toFixed(3)} s`), [currentTimeSec]);
 
-  const normalizedSegments = useMemo(() => {
-    return segments.map(normalizeRow).sort((a, b) => a.startSec - b.startSec);
-  }, [segments]);
+  const normalizedSegments = useMemo(() => segments.map(normalizeRow).sort((a, b) => a.startSec - b.startSec), [segments]);
 
-  // which segment is "active" for current time?
   const activeSegId = useMemo(() => {
     if (currentTimeSec == null) return undefined;
     for (const r of normalizedSegments) {
@@ -197,35 +266,82 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     return undefined;
   }, [currentTimeSec, normalizedSegments]);
 
-  // rule 5: current time in any segment => cannot create start/end
   const isCurrentInsideAnySeg = activeSegId != null;
 
   function canCreateAtCurrent() {
     return currentTimeSec != null && !isCurrentInsideAnySeg;
   }
 
+  /** ===== View range ===== */
+  const viewRange = useMemo(() => {
+    const half = Math.max(windowSec, 1) / 2;
+    const center =
+      followCursor && currentTimeSec != null
+        ? currentTimeSec
+        : windowCenterSec != null
+          ? windowCenterSec
+          : currentTimeSec != null
+            ? currentTimeSec
+            : 0;
+    return { minT: center - half, maxT: center + half, center };
+  }, [windowSec, followCursor, currentTimeSec, windowCenterSec]);
+
+  function timeToX(t: number, width: number, padding: { left: number; right: number }) {
+    const plotW = width - padding.left - padding.right;
+    const u = (t - viewRange.minT) / Math.max(viewRange.maxT - viewRange.minT, 1e-6);
+    return padding.left + u * plotW;
+  }
+  function xToTime(x: number, width: number, padding: { left: number; right: number }) {
+    const plotW = width - padding.left - padding.right;
+    const u = (x - padding.left) / plotW;
+    return viewRange.minT + u * (viewRange.maxT - viewRange.minT);
+  }
+
+  /** ===== Buttons ===== */
   function markStart() {
     if (!canCreateAtCurrent()) {
       setStatus(currentTimeSec == null ? "currentTimeSec is undefined." : "当前时间在已有 segment 内，禁止重合。");
       return;
     }
     setPendingStartSec(currentTimeSec);
+    setPendingCutsSec([]);
     setStatus(`Start set at ${currentTimeSec!.toFixed(3)} s`);
   }
 
+  /**
+   * End button behavior (NEW):
+   * - If pendingStartSec exists and pendingCutsSec not complete:
+   *   end now, and auto-fill remaining cuts by equal split between (lastPoint, end)
+   */
   function markEnd() {
     if (pendingStartSec == null) {
-      setStatus("请先点击 Start。");
+      setStatus("请先点击 Start（或用 Next cut 设定 Start）。");
       return;
     }
     if (!canCreateAtCurrent()) {
       setStatus("当前时间在已有 segment 内，禁止重合。");
       return;
     }
+    if (currentTimeSec == null) {
+      setStatus("currentTimeSec is undefined.");
+      return;
+    }
 
-    const start = Math.min(pendingStartSec, currentTimeSec!);
-    const end = Math.max(pendingStartSec, currentTimeSec!);
+    const task = selectedTask;
+    const nSub = task?.subtasks?.length ?? 0;
+    const needCuts = Math.max(nSub - 1, 0);
 
+    // enforce ordering: start < cuts... < end
+    const start = pendingStartSec;
+    const end = currentTimeSec;
+
+    const lastPoint = pendingCutsSec.length > 0 ? pendingCutsSec[pendingCutsSec.length - 1]! : start;
+    if (end <= lastPoint + EPS) {
+      setStatus(`End 必须大于上一个点：end=${end.toFixed(3)} <= last=${lastPoint.toFixed(3)}`);
+      return;
+    }
+
+    // overlap check with existing segments
     for (const o of normalizedSegments) {
       if (overlaps(start, end, o.startSec, o.endSec)) {
         setStatus(`与已有 segment 重叠，创建失败（${o.startSec.toFixed(3)}→${o.endSec.toFixed(3)}）`);
@@ -233,20 +349,83 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
       }
     }
 
+    // build cuts: existing pending + auto-fill remaining (if any)
+    const cuts = pendingCutsSec.slice(); // already increasing by Next cut rules
+    const remaining = Math.max(needCuts - cuts.length, 0);
+    if (remaining > 0) {
+      const intervalStart = lastPoint;
+      const intervalEnd = end;
+      const step = (intervalEnd - intervalStart) / (remaining + 1);
+      for (let i = 1; i <= remaining; i++) cuts.push(intervalStart + step * i);
+    }
+
+    // clamp and sort final cuts
+    const finalCuts = cuts
+      .map((c) => clamp(c, start + EPS, end - EPS))
+      .slice()
+      .sort((a, b) => a - b);
+
     const seg: SegmentRow = {
       id: newId(),
       startSec: start,
       endSec: end,
-      // 1) prompt default is already in state; End stores current promptText
-      prompt: (promptText ?? "").trim(),
+      prompt: (task?.prompt ?? promptText ?? "").trim(),
+      taskId: task?.id,
+      cutsSec: finalCuts,
     };
 
     setSegments((prev) => [...prev, seg]);
     setPendingStartSec(undefined);
-    setStatus(`Created segment: ${start.toFixed(3)} → ${end.toFixed(3)}`);
+    setPendingCutsSec([]);
+    setStatus(`Created segment: ${start.toFixed(3)} → ${end.toFixed(3)} (cuts=${finalCuts.length}/${needCuts})`);
   }
 
-  // 3) export json filename = same as current mcap base name (best effort)
+  /**
+   * Next cut: sequentially set start -> cut1 -> cut2 -> ... -> end(create)
+   * If user clicks End before finishing cuts, markEnd() will auto-fill the rest.
+   */
+  function nextCut() {
+    if (currentTimeSec == null) {
+      setStatus("currentTimeSec is undefined.");
+      return;
+    }
+    if (isCurrentInsideAnySeg) {
+      setStatus("当前时间在已有 segment 内，禁止重合。");
+      return;
+    }
+
+    const task = selectedTask;
+    const nSub = task?.subtasks?.length ?? 0;
+    const needCuts = Math.max(nSub - 1, 0);
+
+    // if no start yet: set start
+    if (pendingStartSec == null) {
+      setPendingStartSec(currentTimeSec);
+      setPendingCutsSec([]);
+      setStatus(`Start set at ${currentTimeSec.toFixed(3)} s (NextCut mode)`);
+      return;
+    }
+
+    // enforce increasing order
+    const lastPoint = pendingCutsSec.length > 0 ? pendingCutsSec[pendingCutsSec.length - 1]! : pendingStartSec;
+    if (currentTimeSec <= lastPoint + EPS) {
+      setStatus(`需要按顺序递增标注：当前 ${currentTimeSec.toFixed(3)} <= 上一个点 ${lastPoint.toFixed(3)}`);
+      return;
+    }
+
+    // if still need cuts: add a cut
+    if (pendingCutsSec.length < needCuts) {
+      const k = pendingCutsSec.length + 1;
+      setPendingCutsSec((prev) => [...prev, currentTimeSec]);
+      setStatus(`Cut ${k}/${needCuts} set at ${currentTimeSec.toFixed(3)} s`);
+      return;
+    }
+
+    // cuts done; this click becomes end => create segment
+    // (re-use markEnd logic by temporarily treating currentTimeSec as end)
+    markEnd();
+  }
+
   function exportSegments() {
     if (normalizedSegments.length === 0) {
       setStatus("No segments to export yet.");
@@ -257,25 +436,38 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     const filename = safeFilename(`${base}.json`);
 
     const payload = {
-      output_dir: outputDir, // (browser can't write to this path; saved for your python postprocess)
+      output_dir: outputDir,
       source_name: base,
-      segments: normalizedSegments.map((s) => ({
-        startSec: s.startSec,
-        endSec: s.endSec,
-        prompt: s.prompt,
-      })),
+      task_config_version: taskConfig.version,
+      segments: normalizedSegments.map((s) => {
+        const task = taskConfig.tasks.find((t) => t.id === s.taskId);
+        const subtasks = buildSubtasksFromCuts(s, task);
+        return {
+          startSec: s.startSec,
+          endSec: s.endSec,
+          prompt: s.prompt,
+          taskId: s.taskId,
+          subtasks: subtasks.map((st) => ({
+            subtaskId: st.subtaskId,
+            name: st.name,
+            startSec: st.startSec,
+            endSec: st.endSec,
+            prompt: st.prompt,
+          })),
+        };
+      }),
     };
 
     downloadJson(filename, payload);
     setStatus(`Exported ${payload.segments.length} segments to ${filename}`);
   }
 
-  // 4) clear confirm
   function clearAll() {
     const ok = window.confirm("确定要清空所有 segments 吗？此操作不可恢复。");
     if (!ok) return;
     setSegments([]);
     setPendingStartSec(undefined);
+    setPendingCutsSec([]);
     setStatus("Cleared.");
   }
 
@@ -283,7 +475,7 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     setSegments((prev) => prev.filter((s) => s.id !== segId));
   }
 
-  /** ===== Drag constraints (no overlap, keep start<end) ===== */
+  /** ===== Drag constraints ===== */
   function getNeighbors(segId: string, sorted: SegmentRow[]) {
     const i = sorted.findIndex((s) => s.id === segId);
     return {
@@ -293,13 +485,13 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     };
   }
 
-  function applyDrag(segId: string, handle: DragHandle, newTime: number) {
+  function applyDragBoundary(segId: string, kind: "start" | "end", newTime: number) {
     setSegments((prev) => {
       const idx = prev.findIndex((s) => s.id === segId);
       if (idx < 0) return prev;
 
       const cur0 = prev[idx];
-      if (!cur0) return prev; // for noUncheckedIndexedAccess
+      if (!cur0) return prev;
 
       const sorted = prev.map(normalizeRow).sort((a, b) => a.startSec - b.startSec);
       const { prev: nPrev, next: nNext } = getNeighbors(segId, sorted);
@@ -311,52 +503,60 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
       if (nPrev) minAllowed = Math.max(minAllowed, nPrev.endSec + EPS);
       if (nNext) maxAllowed = Math.min(maxAllowed, nNext.startSec - EPS);
 
-      if (handle === "start") maxAllowed = Math.min(maxAllowed, cur.endSec - EPS);
+      if (kind === "start") maxAllowed = Math.min(maxAllowed, cur.endSec - EPS);
       else minAllowed = Math.max(minAllowed, cur.startSec + EPS);
 
       const t = clamp(newTime, minAllowed, maxAllowed);
 
-      const proposedStart = handle === "start" ? t : cur.startSec;
-      const proposedEnd = handle === "end" ? t : cur.endSec;
+      const proposedStart = kind === "start" ? t : cur.startSec;
+      const proposedEnd = kind === "end" ? t : cur.endSec;
 
       for (const o of sorted) {
         if (o.id === segId) continue;
         if (overlaps(proposedStart, proposedEnd, o.startSec, o.endSec)) return prev;
       }
 
-      const updated: SegmentRow = handle === "start" ? { ...cur, startSec: t } : { ...cur, endSec: t };
+      const oldStart = cur.startSec;
+      const oldEnd = cur.endSec;
+      const oldCuts = (cur.cutsSec ?? []).slice();
+
+      const updatedBase: SegmentRow = kind === "start" ? { ...cur, startSec: t } : { ...cur, endSec: t };
+      const updatedNorm = normalizeRow(updatedBase);
+
+      const newCuts = remapCutsByRatio(oldStart, oldEnd, updatedNorm.startSec, updatedNorm.endSec, oldCuts)
+        .map((c) => clamp(c, updatedNorm.startSec + EPS, updatedNorm.endSec - EPS))
+        .slice()
+        .sort((a, b) => a - b);
 
       const nextList = [...prev];
-      nextList[idx] = normalizeRow(updated);
+      nextList[idx] = { ...updatedNorm, cutsSec: newCuts };
       return nextList;
     });
   }
 
-  /** ===== Fixed window range (NO auto scaling) ===== */
-  const viewRange = useMemo(() => {
-    const half = Math.max(windowSec, 1) / 2;
-    const center =
-      followCursor && currentTimeSec != null
-        ? currentTimeSec
-        : windowCenterSec != null
-          ? windowCenterSec
-          : currentTimeSec != null
-            ? currentTimeSec
-            : 0;
+  function applyDragCut(segId: string, cutIndex: number, newTime: number) {
+    setSegments((prev) => {
+      const idx = prev.findIndex((s) => s.id === segId);
+      if (idx < 0) return prev;
 
-    return { minT: center - half, maxT: center + half, center };
-  }, [windowSec, followCursor, currentTimeSec, windowCenterSec]);
+      const cur0 = prev[idx];
+      if (!cur0) return prev;
 
-  function timeToX(t: number, width: number, padding: { left: number; right: number }) {
-    const plotW = width - padding.left - padding.right;
-    const u = (t - viewRange.minT) / Math.max(viewRange.maxT - viewRange.minT, 1e-6);
-    return padding.left + u * plotW;
-  }
+      const cur = normalizeRow(cur0);
+      const cuts = (cur.cutsSec ?? []).slice().sort((a, b) => a - b);
 
-  function xToTime(x: number, width: number, padding: { left: number; right: number }) {
-    const plotW = width - padding.left - padding.right;
-    const u = (x - padding.left) / plotW;
-    return viewRange.minT + u * (viewRange.maxT - viewRange.minT);
+      if (cutIndex < 0 || cutIndex >= cuts.length) return prev;
+
+      const lo = cutIndex === 0 ? cur.startSec + EPS : cuts[cutIndex - 1]! + EPS;
+      const hi = cutIndex === cuts.length - 1 ? cur.endSec - EPS : cuts[cutIndex + 1]! - EPS;
+
+      const t = clamp(newTime, lo, hi);
+      cuts[cutIndex] = t;
+
+      const nextList = [...prev];
+      nextList[idx] = { ...cur, cutsSec: cuts.slice().sort((a, b) => a - b) };
+      return nextList;
+    });
   }
 
   /** ===== Canvas drawing ===== */
@@ -380,7 +580,6 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, width, height);
 
-    // grid (no numbers)
     ctx.strokeStyle = "#eee";
     ctx.lineWidth = 1;
     const gridLines = 10;
@@ -392,7 +591,6 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
       ctx.stroke();
     }
 
-    // fixed track height = 10
     const trackHeight = 10;
     const trackY = plotY + plotH / 2 - trackHeight / 2;
     const cy = trackY + trackHeight / 2;
@@ -404,13 +602,10 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     ctx.strokeRect(plotX, trackY, plotW, trackHeight);
 
     for (const s of normalizedSegments) {
-      const segStart = s.startSec;
-      const segEnd = s.endSec;
-      if (segEnd < viewRange.minT - 1 || segStart > viewRange.maxT + 1) continue;
+      if (s.endSec < viewRange.minT - 1 || s.startSec > viewRange.maxT + 1) continue;
 
-      const x1 = timeToX(segStart, width, padding);
-      const x2 = timeToX(segEnd, width, padding);
-
+      const x1 = timeToX(s.startSec, width, padding);
+      const x2 = timeToX(s.endSec, width, padding);
       const isActive = s.id === activeSegId;
 
       ctx.fillStyle = isActive ? "rgba(156, 39, 176, 0.35)" : "rgba(156, 39, 176, 0.22)";
@@ -420,8 +615,10 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
       ctx.lineWidth = 2;
       ctx.strokeRect(Math.min(x1, x2), trackY, Math.abs(x2 - x1), trackHeight);
 
+      // boundary points
       const drawR = 7;
 
+      // Start red
       ctx.fillStyle = "#F44336";
       ctx.beginPath();
       ctx.arc(x1, cy, drawR, 0, Math.PI * 2);
@@ -430,6 +627,7 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
       ctx.lineWidth = 2;
       ctx.stroke();
 
+      // End blue
       ctx.fillStyle = "#2196F3";
       ctx.beginPath();
       ctx.arc(x2, cy, drawR, 0, Math.PI * 2);
@@ -437,6 +635,24 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
       ctx.strokeStyle = "#fff";
       ctx.lineWidth = 2;
       ctx.stroke();
+
+      // cut points colored
+      const cuts = (s.cutsSec ?? []).slice().sort((a, b) => a - b);
+      for (let i = 0; i < cuts.length; i++) {
+        const t = cuts[i]!;
+        if (t < viewRange.minT - 1 || t > viewRange.maxT + 1) continue;
+        const cxp = timeToX(t, width, padding);
+
+        const color = CUT_COLORS[i % CUT_COLORS.length] ?? "#2ecc71";
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(cxp, cy, 6, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
     }
 
     // current time line
@@ -462,7 +678,25 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
       ctx.stroke();
       ctx.setLineDash([]);
     }
-  }, [normalizedSegments, currentTimeSec, pendingStartSec, viewRange, activeSegId]);
+
+    // pending cuts (preview) as small dots
+    if (pendingStartSec != null && pendingCutsSec.length > 0) {
+      const trackDotY = cy;
+      for (let i = 0; i < pendingCutsSec.length; i++) {
+        const t = pendingCutsSec[i]!;
+        if (t < viewRange.minT - 1 || t > viewRange.maxT + 1) continue;
+        const cxp = timeToX(t, width, padding);
+        const color = CUT_COLORS[i % CUT_COLORS.length] ?? "#2ecc71";
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(cxp, trackDotY, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+  }, [normalizedSegments, currentTimeSec, pendingStartSec, pendingCutsSec, viewRange, activeSegId]);
 
   /** ===== Drag hit test ===== */
   function findHandleHit(mouseX: number, mouseY: number): DragState {
@@ -480,14 +714,20 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     const trackY = plotY + plotH / 2 - trackHeight / 2;
     const cy = trackY + trackHeight / 2;
 
-    const hitR = 10;
+    const hitR = 11;
 
     for (const s of normalizedSegments) {
       const x1 = timeToX(s.startSec, width, { left: padding.left, right: padding.right });
       const x2 = timeToX(s.endSec, width, { left: padding.left, right: padding.right });
 
-      if (Math.hypot(mouseX - x1, mouseY - cy) <= hitR) return { segId: s.id, handle: "start" };
-      if (Math.hypot(mouseX - x2, mouseY - cy) <= hitR) return { segId: s.id, handle: "end" };
+      if (Math.hypot(mouseX - x1, mouseY - cy) <= hitR) return { segId: s.id, kind: "start" };
+      if (Math.hypot(mouseX - x2, mouseY - cy) <= hitR) return { segId: s.id, kind: "end" };
+
+      const cuts = (s.cutsSec ?? []).slice().sort((a, b) => a - b);
+      for (let i = 0; i < cuts.length; i++) {
+        const cxp = timeToX(cuts[i]!, width, { left: padding.left, right: padding.right });
+        if (Math.hypot(mouseX - cxp, mouseY - cy) <= hitR) return { segId: s.id, kind: "cut", cutIndex: i };
+      }
     }
     return null;
   }
@@ -506,7 +746,7 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     if (hit) {
       dragRef.current = hit;
       canvas.setPointerCapture(e.pointerId);
-      setStatus(`Dragging ${hit.handle}...`);
+      setStatus(hit.kind === "cut" ? `Dragging cut[${hit.cutIndex}]...` : `Dragging ${hit.kind}...`);
     }
   }
 
@@ -524,7 +764,11 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     const padding = { left: 20, right: 20 };
     const t = xToTime(x, canvas.width, padding);
 
-    applyDrag(drag.segId, drag.handle, t);
+    if (drag.kind === "start" || drag.kind === "end") {
+      applyDragBoundary(drag.segId, drag.kind, t);
+    } else {
+      applyDragCut(drag.segId, drag.cutIndex, t);
+    }
   }
 
   function onPointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -539,42 +783,21 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     }
   }
 
-  // wheel changes windowSec
   function onWheel(e: React.WheelEvent<HTMLCanvasElement>) {
     e.preventDefault();
     const factor = e.deltaY > 0 ? 1.15 : 1 / 1.15;
     setWindowSec((prev) => clamp(prev * factor, 2, 600));
   }
 
-  // disable create buttons
+  /** ===== UI states ===== */
   const startDisabled = !canCreateAtCurrent() || pendingStartSec != null;
   const endDisabled = pendingStartSec == null || !canCreateAtCurrent();
+  const nextCutDisabled = !canCreateAtCurrent();
 
-  // auto-scroll active row into view
-  // useEffect(() => {
-  //   if (!activeSegId) return;
-  //   const el = rowRefs.current[activeSegId];
-  //   if (el) el.scrollIntoView({ block: "nearest", inline: "nearest" });
-  // }, [activeSegId, normalizedSegments.length]);
-  useEffect(() => {
-    const c = context as any;
-
-    console.log("[umi] context keys:", Object.keys(c));
-
-    console.log("[umi] dataSource:", c.dataSource);
-    console.log("[umi] playerState:", c.playerState);
-    console.log("[umi] playbackState:", c.playbackState);
-    console.log("[umi] session:", c.session);
-    console.log("[umi] layout:", c.layout);
-    console.log("[umi] app:", c.app);
-
-    // 如果有更深层
-    console.log("[umi] dataSource keys:", c.dataSource ? Object.keys(c.dataSource) : null);
-  }, [context]);
-
+  const needCutsForTask = Math.max((selectedTask?.subtasks?.length ?? 0) - 1, 0);
 
   /** ===== Render ===== */
-  const tableMaxHeight = 10 * 34 + 36; // ~ 10 rows
+  const tableMaxHeight = 10 * 34 + 36;
 
   return (
     <div style={{ padding: 12, fontFamily: "sans-serif", pointerEvents: "auto" }}>
@@ -620,10 +843,11 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
 
         {pendingStartSec != null ? (
           <div style={{ padding: "2px 8px", border: "1px solid #ccc", borderRadius: 6 }}>
-            pending start: <b>{pendingStartSec.toFixed(3)} s</b>
+            pending start: <b>{pendingStartSec.toFixed(3)} s</b> | cuts:{" "}
+            <b>{pendingCutsSec.length}</b>/<b>{needCutsForTask}</b>
           </div>
         ) : (
-          <div style={{ color: "#666" }}>在顶部时间轴定位到某个时刻，然后点 Start</div>
+          <div style={{ color: "#666" }}>在时间轴定位到某个时刻，然后点 Start（或直接点 Next cut）</div>
         )}
       </div>
 
@@ -633,9 +857,50 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
         </div>
       ) : null}
 
-      {/* 1) Prompt with default */}
+      {/* Task selector */}
       <div style={{ marginBottom: 10 }}>
-        <div style={{ marginBottom: 6, color: "#555" }}>Prompt（End 时写入 segment）：</div>
+        <div style={{ marginBottom: 6, color: "#555" }}>Task（从 task_config.json 加载）：</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <select
+            value={selectedTaskId}
+            onChange={(e) => {
+              const id = e.target.value;
+              setSelectedTaskId(id);
+              const t = taskConfig.tasks.find((x) => x.id === id);
+              if (t?.prompt) setPromptText(t.prompt);
+              setStatus(`Selected task: ${t?.name ?? id}`);
+            }}
+            style={{ padding: "6px 8px", border: "1px solid #ccc", borderRadius: 6, minWidth: 320 }}
+          >
+            {taskConfig.tasks.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+
+          <div style={{ color: "#666" }}>
+            subtasks: <b>{selectedTask?.subtasks?.length ?? 0}</b>
+          </div>
+          <div style={{ color: "#888", fontSize: 12 }}>
+            Next cut：按顺序点 Start→Cut…→End；也可中途直接点 End 自动补齐剩余 cut（均分 last→end）
+          </div>
+        </div>
+
+        {selectedTask?.subtasks?.length ? (
+          <div style={{ marginTop: 6, fontSize: 12, color: "#666" }}>
+            {selectedTask.subtasks.map((s, i) => (
+              <div key={s.id}>
+                {i + 1}. <b>{s.name ?? s.id}</b> — {s.prompt}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      {/* Prompt */}
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ marginBottom: 6, color: "#555" }}>Prompt（写入 segment）：</div>
         <input
           value={promptText}
           onChange={(e) => setPromptText(e.target.value)}
@@ -643,7 +908,7 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
         />
       </div>
 
-      {/* 2) Output dir with default */}
+      {/* Output dir */}
       <div style={{ marginBottom: 10 }}>
         <div style={{ marginBottom: 6, color: "#555" }}>输出路径（写入 JSON，供后处理脚本使用）：</div>
         <input
@@ -653,9 +918,12 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
         />
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
         <button onClick={markStart} disabled={startDisabled} title={isCurrentInsideAnySeg ? "当前时间在 segment 内，禁止重合" : ""}>
           Start @ currentTime
+        </button>
+        <button onClick={nextCut} disabled={nextCutDisabled} title={isCurrentInsideAnySeg ? "当前时间在 segment 内，禁止重合" : ""}>
+          Next cut
         </button>
         <button onClick={markEnd} disabled={endDisabled} title={isCurrentInsideAnySeg ? "当前时间在 segment 内，禁止重合" : ""}>
           End @ currentTime
@@ -683,73 +951,81 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
           />
         </div>
         <div style={{ marginTop: 6, fontSize: 12, color: "#666" }}>
-          红点=Start，蓝点=End。滚轮调整 windowSec。导出文件名会尽量与当前 mcap 同名（若数据源不提供文件名则退化为 recording.json）。
+          红点=Start，蓝点=End，彩色点=Subtask 分割点（可拖动）。Next cut 期间，pending cut 也会以小点预览。
         </div>
       </div>
 
       {/* Table */}
       <h3 style={{ margin: "0 0 8px" }}>Segments ({normalizedSegments.length})</h3>
 
-      <div
-        style={{
-          maxHeight: tableMaxHeight,
-          overflowY: "auto",
-          border: "1px solid #eee",
-          borderRadius: 6,
-        }}
-      >
-        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 740 }}>
+      <div style={{ maxHeight: tableMaxHeight, overflowY: "auto", border: "1px solid #eee", borderRadius: 6 }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 980 }}>
           <thead style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1 }}>
             <tr>
               <th style={thStyle}>#</th>
               <th style={thStyle}>Start (s)</th>
               <th style={thStyle}>End (s)</th>
               <th style={thStyle}>Duration (s)</th>
+              <th style={thStyle}>Task</th>
               <th style={thStyle}>Prompt</th>
+              <th style={thStyle}>Cuts</th>
+              <th style={thStyle}>Subtasks (derived)</th>
               <th style={thStyle}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {normalizedSegments.length === 0 ? (
               <tr>
-                <td style={tdStyle} colSpan={6}>
-                  No segments yet. 先点 Start，再点 End。
+                <td style={tdStyle} colSpan={9}>
+                  No segments yet. 先点 Start，再点 End；或使用 Next cut。
                 </td>
               </tr>
             ) : (
               normalizedSegments.map((s, idx) => {
-                const isActive = s.id === activeSegId;
+                const task = taskConfig.tasks.find((t) => t.id === s.taskId);
+                const taskName = task?.name ?? s.taskId ?? "-";
+                const subtasks = buildSubtasksFromCuts(s, task);
+
                 return (
-                  <tr
-                    key={s.id}
-                    ref={(el) => {
-                      rowRefs.current[s.id] = el;
-                    }}
-                    style={{
-                      background: isActive ? "#e9e9e9" : "transparent",
-                      transition: "background 120ms",
-                    }}
-                  >
+                  <tr key={s.id}>
                     <td style={tdStyle}>{idx}</td>
                     <td style={tdStyle}>{s.startSec.toFixed(3)}</td>
                     <td style={tdStyle}>{s.endSec.toFixed(3)}</td>
                     <td style={tdStyle}>{(s.endSec - s.startSec).toFixed(3)}</td>
+                    <td style={tdStyle}>{taskName}</td>
                     <td style={{ ...tdStyle, wordBreak: "break-word" }}>{s.prompt}</td>
+                    <td style={{ ...tdStyle, fontSize: 12, color: "#555" }}>
+                      {(s.cutsSec ?? []).length ? (s.cutsSec ?? []).map((c) => c.toFixed(3)).join(", ") : "-"}
+                    </td>
+                    <td style={{ ...tdStyle, fontSize: 12, color: "#555" }}>
+                      {subtasks.length ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          {subtasks.map((st, i) => (
+                            <div key={st.subtaskId}>
+                              <span
+                                style={{
+                                  display: "inline-block",
+                                  width: 10,
+                                  height: 10,
+                                  borderRadius: 999,
+                                  background: (CUT_COLORS[i % CUT_COLORS.length] ?? "#2ecc71"),
+                                  marginRight: 6,
+                                  verticalAlign: "middle",
+                                }}
+                              />
+                              <b>{st.name ?? st.subtaskId}</b>: {st.startSec.toFixed(3)} → {st.endSec.toFixed(3)} — {st.prompt}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
                     <td style={tdStyle}>
-                      <button
-                        onClick={() => seekTo(s.startSec)}
-                        disabled={!canSeek}
-                        style={{ marginRight: 8 }}
-                        title={!canSeek ? "Data source does not support seekPlayback" : ""}
-                      >
+                      <button onClick={() => seekTo(s.startSec)} disabled={!canSeek} style={{ marginRight: 8 }}>
                         Start
                       </button>
-                      <button
-                        onClick={() => seekTo(s.endSec)}
-                        disabled={!canSeek}
-                        style={{ marginRight: 8 }}
-                        title={!canSeek ? "Data source does not support seekPlayback" : ""}
-                      >
+                      <button onClick={() => seekTo(s.endSec)} disabled={!canSeek} style={{ marginRight: 8 }}>
                         End
                       </button>
                       <button onClick={() => removeRow(s.id)}>Delete</button>
@@ -770,13 +1046,17 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
           <div>seekPlayback supported: {String(canSeek)}</div>
           <div>currentTimeSec: {currentTimeSec ?? "undefined"}</div>
           <div>pendingStartSec: {pendingStartSec ?? "undefined"}</div>
+          <div>pendingCutsSec: {pendingCutsSec.map((x) => x.toFixed(3)).join(", ") || "[]"}</div>
           <div>segments count: {segments.length}</div>
           <div>activeSegId: {activeSegId ?? "none"}</div>
           <div>windowSec: {windowSec.toFixed(2)}</div>
           <div>followCursor: {String(followCursor)}</div>
           <div>windowCenterSec: {windowCenterSec ?? "undefined"}</div>
           <div>outputDir: {outputDir}</div>
+          <div>selectedTaskId: {selectedTaskId}</div>
           <div>derived base name: {getRecordingBaseName(context) ?? "(unavailable)"}</div>
+          <div>task_config_version: {taskConfig.version}</div>
+          <div>tasks count: {taskConfig.tasks.length}</div>
         </div>
       </details>
     </div>
@@ -790,7 +1070,6 @@ const thStyle: React.CSSProperties = {
   background: "#f6f6f6",
   fontWeight: 700,
 };
-
 const tdStyle: React.CSSProperties = {
   borderBottom: "1px solid #eee",
   padding: "6px 8px",

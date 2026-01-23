@@ -1,0 +1,36 @@
+{
+  "output_dir": "/data/label_data/seg",
+  "source_name": "recording",
+  "task_config_version": 1,
+  "segments": [
+    {
+      "startSec": 1768893106.3550186,
+      "endSec": 1768893115.3952856,
+      "prompt": "pick the bottle and put into the box",
+      "taskId": "pick_cillion",
+      "subtasks": [
+        {
+          "subtaskId": "pick",
+          "name": "pick",
+          "startSec": 1768893106.3550186,
+          "endSec": 1768893109.561021,
+          "prompt": "pick the bottle"
+        },
+        {
+          "subtaskId": "place",
+          "name": "place",
+          "startSec": 1768893109.561021,
+          "endSec": 1768893113.027636,
+          "prompt": "place the bottle into the box"
+        },
+        {
+          "subtaskId": "back",
+          "name": "back",
+          "startSec": 1768893113.027636,
+          "endSec": 1768893115.3952856,
+          "prompt": "move back to base pose"
+        }
+      ]
+    }
+  ]
+}

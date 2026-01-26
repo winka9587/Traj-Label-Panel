@@ -1,4 +1,4 @@
-from pose_trajectory_interpolator import PoseTrajectoryInterpolator
+from utils.pose_trajectory_interpolator import PoseTrajectoryInterpolator
 import scipy.interpolate as si
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np

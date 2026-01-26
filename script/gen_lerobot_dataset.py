@@ -6,6 +6,7 @@
 import os
 import json
 import argparse
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
@@ -14,6 +15,21 @@ import cv2
 import hashlib
 from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+
+logging.basicConfig(
+    level=logging.INFO,
+    # level=logging.DEBUG,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    force=True,
+)
+logger = logging.getLogger(__name__)
+
+import sys, os
+logger.info(f"[DEBUG] __file__={__file__}")
+logger.info(f"[BOOT] cwd={os.getcwd()}")
+logger.info(f"[BOOT] python={sys.executable}")
+logger.info("[BOOT] logging is alive")
+
 
 try:
     from tqdm import tqdm
@@ -31,7 +47,8 @@ from utils.data_sync import sync_topic_data
 
 def calculate_file_hash(file_path: str) -> str:
     """
-    计算文件的SHA256哈希值
+    计算文件的快速哈希值（用于文件去重）
+    对于大文件，只读取部分内容以加快速度
     
     Args:
         file_path: 文件路径
@@ -39,17 +56,46 @@ def calculate_file_hash(file_path: str) -> str:
     Returns:
         文件的十六进制哈希值
     """
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        # 分块读取，避免大文件占用过多内存
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
+    import os
+    file_size = os.path.getsize(file_path)
+    file_stat = os.stat(file_path)
+    
+    # 对于小文件（<10MB），使用完整文件哈希
+    # 对于大文件，使用文件大小 + 修改时间 + 部分内容
+    if file_size < 10 * 1024 * 1024:  # 10MB
+        # 小文件：使用 MD5（比 SHA256 快）
+        md5_hash = hashlib.md5()
+        with open(file_path, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                md5_hash.update(byte_block)
+        return md5_hash.hexdigest()
+    else:
+        # 大文件：使用文件大小 + 修改时间 + 文件头尾部分内容
+        # 读取前 1MB + 后 1MB + 文件大小 + 修改时间
+        sample_size = 1024 * 1024  # 1MB
+        md5_hash = hashlib.md5()
+        
+        # 添加文件大小和修改时间
+        md5_hash.update(str(file_size).encode())
+        md5_hash.update(str(file_stat.st_mtime).encode())
+        
+        with open(file_path, "rb") as f:
+            # 读取文件开头
+            head_data = f.read(sample_size)
+            md5_hash.update(head_data)
+            
+            # 读取文件结尾
+            if file_size > sample_size * 2:
+                f.seek(file_size - sample_size)
+                tail_data = f.read(sample_size)
+                md5_hash.update(tail_data)
+        
+        return md5_hash.hexdigest()
 
 
 def get_processed_files_path(output_path: Optional[str], repo_name: str) -> Path:
     """
-    获取处理记录JSON文件的路径
+    获取处理记录JSON文件的路径（位于lerobot数据目录下）
     
     Args:
         output_path: 输出路径（可选）
@@ -63,7 +109,8 @@ def get_processed_files_path(output_path: Optional[str], repo_name: str) -> Path
     else:
         base_path = Path(output_path)
     
-    return base_path / "processed_files.json"
+    # 将文件放在lerobot数据目录下
+    return base_path / repo_name / "processed_files.json"
 
 
 def load_processed_files(output_path: Optional[str], repo_name: str) -> Dict[str, Any]:
@@ -86,7 +133,7 @@ def load_processed_files(output_path: Optional[str], repo_name: str) -> Dict[str
         with open(processed_files_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        print(f"警告: 无法读取处理记录文件 {processed_files_path}: {e}")
+        logger.warning(f"无法读取处理记录文件 {processed_files_path}: {e}")
         return {}
 
 
@@ -112,7 +159,7 @@ def save_processed_files(
         with open(processed_files_path, 'w', encoding='utf-8') as f:
             json.dump(processed_files, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"警告: 无法保存处理记录文件 {processed_files_path}: {e}")
+        logger.warning(f"无法保存处理记录文件 {processed_files_path}: {e}")
 
 
 def check_already_processed(
@@ -134,24 +181,29 @@ def check_already_processed(
         (是否已处理, 处理记录信息)
     """
     # 计算文件哈希
+    logger.info("calculating file hashes for checking...")
     try:
         mcap_hash = calculate_file_hash(mcap_path)
         segments_hash = calculate_file_hash(segments_json_path)
     except Exception as e:
-        print(f"警告: 无法计算文件哈希: {e}")
+        logger.warning(f"无法计算文件哈希: {e}")
         return False, None
     
     # 组合哈希作为唯一标识
     combined_hash = f"{mcap_hash}_{segments_hash}"
     
     # 加载处理记录
+    logger.info("loading processed files record...")
     processed_files = load_processed_files(output_path, repo_name)
     
+    logger.info("checking processed files...")
     # 检查是否已处理
     if combined_hash in processed_files:
         record = processed_files[combined_hash]
+        logger.info(f"found processed record: {record}")
         return True, record
     
+    logger.info("no processed record found")
     return False, None
 
 
@@ -177,7 +229,7 @@ def update_processed_files(
         mcap_hash = calculate_file_hash(mcap_path)
         segments_hash = calculate_file_hash(segments_json_path)
     except Exception as e:
-        print(f"警告: 无法计算文件哈希: {e}")
+        logger.warning(f"无法计算文件哈希: {e}")
         return
     
     # 组合哈希作为唯一标识
@@ -209,9 +261,9 @@ def print_topic_data_summary(topic_data: Dict[str, Dict[str, List[Tuple[float, A
                 end_time = data_list[-1][0]
                 time_span = end_time - start_time
                 fps = len(data_list) / time_span if time_span > 0 else 0.0
-                print(f"已加载 {data_type} topic '{topic_name}'，数据量: {len(data_list)}，时间范围: {time_span:.2f}s，帧率: {fps:.2f} Hz")
+                logger.debug(f"已加载 {data_type} topic '{topic_name}'，数据量: {len(data_list)}，时间范围: {time_span:.2f}s，帧率: {fps:.2f} Hz")
             else:
-                print(f"已加载 {data_type} topic '{topic_name}'，数据量: {len(data_list)}")
+                logger.debug(f"已加载 {data_type} topic '{topic_name}'，数据量: {len(data_list)}")
 
 
 def create_lerobot_dataset(
@@ -237,29 +289,31 @@ def create_lerobot_dataset(
     Returns:
         处理日志
     """
-    logs = []
-    
     # 检查文件是否存在
     if not os.path.isfile(mcap_path):
-        return f"错误: mcap文件不存在: {mcap_path}"
+        error_msg = f"错误: mcap文件不存在: {mcap_path}"
+        logger.error(error_msg)
+        return error_msg
     
     if not os.path.isfile(segments_json_path):
-        return f"错误: segments.json文件不存在: {segments_json_path}"
+        error_msg = f"错误: segments.json文件不存在: {segments_json_path}"
+        logger.error(error_msg)
+        return error_msg
     
     # 检查是否已经处理过
     already_processed, record = check_already_processed(mcap_path, segments_json_path, output_path, repo_name)
     if already_processed and record:
         if record.get('in_lerobot', False):
-            logs.append(f"文件组合已处理过，且已在lerobot数据集中，跳过处理")
-            logs.append(f"  mcap文件: {record.get('mcap_path', mcap_path)}")
-            logs.append(f"  segments文件: {record.get('segments_json_path', segments_json_path)}")
-            logs.append(f"  repo名称: {record.get('repo_name', repo_name)}")
-            return "\n".join(logs)
+            logger.info("文件组合已处理过，且已在lerobot数据集中，跳过处理")
+            logger.info(f"  mcap文件: {record.get('mcap_path', mcap_path)}")
+            logger.info(f"  segments文件: {record.get('segments_json_path', segments_json_path)}")
+            logger.info(f"  repo名称: {record.get('repo_name', repo_name)}")
+            return "已跳过处理（文件已存在）"
         else:
-            logs.append(f"文件组合已处理过，但未在lerobot中，继续处理...")
+            logger.info("文件组合已处理过，但未在lerobot中，继续处理...")
     
-    logs.append(f"读取mcap文件: {mcap_path}")
-    logs.append(f"读取segments文件: {segments_json_path}")
+    logger.info(f"读取mcap文件: {mcap_path}")
+    logger.info(f"读取segments文件: {segments_json_path}")
     
     # key是type, value是topic列表
     topic_list = {
@@ -272,9 +326,11 @@ def create_lerobot_dataset(
     # 先读取segments.json，收集所有需要的时间范围
     try:
         segments = load_segments_json(segments_json_path)
-        logs.append(f"成功读取segments.json，找到 {len(segments)} 个segment")
+        logger.info(f"成功读取segments.json，找到 {len(segments)} 个segment")
     except Exception as e:
-        return f"读取segments.json失败: {e}"
+        error_msg = f"读取segments.json失败: {e}"
+        logger.error(error_msg)
+        return error_msg
     
     # 收集所有需要的时间范围（包括segment和subtask）
     time_ranges = []
@@ -327,7 +383,9 @@ def create_lerobot_dataset(
                 })
     
     if not time_ranges:
-        return "错误: 没有有效的时间范围"
+        error_msg = "错误: 没有有效的时间范围"
+        logger.error(error_msg)
+        return error_msg
     
     # 合并重叠的时间范围，计算需要加载的总时间范围
     time_ranges.sort(key=lambda x: x[0])
@@ -348,18 +406,20 @@ def create_lerobot_dataset(
     overall_start = min(r[0] for r in merged_ranges)
     overall_end = max(r[1] for r in merged_ranges)
     
-    logs.append(f"收集到 {len(segment_info_list)} 个有效的时间段")
-    logs.append(f"合并后需要加载的时间范围: {overall_start:.2f}s - {overall_end:.2f}s (共 {overall_end - overall_start:.2f}s)")
+    logger.info(f"收集到 {len(segment_info_list)} 个有效的时间段")
+    logger.info(f"合并后需要加载的时间范围: {overall_start:.2f}s - {overall_end:.2f}s (共 {overall_end - overall_start:.2f}s)")
     
     # 一次性加载所有需要的数据
     try:
-        logs.append("从mcap文件一次性加载数据...")
+        logger.info("从mcap文件一次性加载数据...")
         all_topic_data = load_mcap_data(mcap_path, topic_list, 
                                        start_time=overall_start, 
                                        end_time=overall_end)
-        logs.append("数据加载完成")
+        logger.info("数据加载完成")
     except Exception as e:
-        return f"读取mcap文件失败: {e}"
+        error_msg = f"读取mcap文件失败: {e}"
+        logger.error(error_msg)
+        return error_msg
     
     # 确定输出路径
     if output_path is None:
@@ -371,7 +431,7 @@ def create_lerobot_dataset(
     if clear_dataset and lerobot_output_path.exists():
         import shutil
         shutil.rmtree(lerobot_output_path)
-        logs.append(f"已清空已存在的数据集: {lerobot_output_path}")
+        logger.info(f"已清空已存在的数据集: {lerobot_output_path}")
         
         # 如果清空数据集，也清除相关的处理记录
         try:
@@ -387,21 +447,21 @@ def create_lerobot_dataset(
                 if combined_hash in processed_files:
                     del processed_files[combined_hash]
                     save_processed_files(output_path, repo_name, processed_files)
-                    logs.append(f"已清除相关的处理记录")
+                    logger.info("已清除相关的处理记录")
         except Exception as e:
-            logs.append(f"警告: 清除处理记录失败: {e}")
+            logger.warning(f"清除处理记录失败: {e}")
     
     # 创建或加载lerobot数据集
     lerobot_exists = lerobot_output_path.exists()
     if lerobot_exists:
-        logs.append(f"数据集已存在，追加新episode: {lerobot_output_path}")
+        logger.info(f"数据集已存在，追加新episode: {lerobot_output_path}")
         dataset = LeRobotDataset(repo_id=repo_name)
         dataset.start_image_writer(
             num_processes=5,
             num_threads=10,
         )
     else:
-        logs.append(f"创建新数据集: {lerobot_output_path}")
+        logger.info(f"创建新数据集: {lerobot_output_path}")
         # 图像尺寸：参考 refer_create_lerobot.py，使用 (640, 480, 3) 即 (width, height, channel)
         image_shape = (640, 480, 3)  # 默认尺寸，参考 refer_create_lerobot.py
         
@@ -448,7 +508,7 @@ def create_lerobot_dataset(
         else:
             log_prefix = f"Segment {seg_info['segment_idx']}"
         
-        logs.append(f"处理{log_prefix}: {start_sec:.2f}s - {end_sec:.2f}s")
+        logger.info(f"处理{log_prefix}: {start_sec:.2f}s - {end_sec:.2f}s")
         
         try:
             # 从已加载的数据中裁剪当前segment/subtask的时间范围
@@ -463,10 +523,10 @@ def create_lerobot_dataset(
                         segment_topic_data[data_type][topic_name] = filtered_data
             
             # 对裁剪后的数据进行同步和插值
-            logs.append(f"{log_prefix}: 开始数据同步&插值...")
+            logger.info(f"{log_prefix}: 开始数据同步&插值...")
             segment_topic_data = sync_topic_data(segment_topic_data, time_diff_limit=0.03)
             print_topic_data_summary(segment_topic_data)
-            logs.append(f"{log_prefix}: 数据同步&插值完成")
+            logger.info(f"{log_prefix}: 数据同步&插值完成")
             
             # 提取segment数据
             image_list, state_list, timestamp_list = extract_segment_data(
@@ -474,7 +534,7 @@ def create_lerobot_dataset(
             )
             
             if len(image_list) == 0:
-                logs.append(f"{log_prefix}: 跳过，未提取到数据")
+                logger.warning(f"{log_prefix}: 跳过，未提取到数据")
                 skipped_count += 1
                 continue
             
@@ -535,26 +595,61 @@ def create_lerobot_dataset(
             
             dataset.save_episode()
             processed_count += 1
-            logs.append(f"{log_prefix}: 成功添加 {len(image_list)} 帧")
+            logger.info(f"{log_prefix}: 成功添加 {len(image_list)} 帧")
             
         except Exception as e:
-            logs.append(f"{log_prefix}: 处理失败: {e}")
+            logger.error(f"{log_prefix}: 处理失败: {e}")
             import traceback
-            logs.append(traceback.format_exc())
+            logger.error(traceback.format_exc())
             skipped_count += 1
     
-    logs.append(f"\n完成！成功处理 {processed_count} 个segment，跳过 {skipped_count} 个segment")
-    logs.append(f"数据集保存位置: {lerobot_output_path}")
+    logger.info(f"完成！成功处理 {processed_count} 个segment，跳过 {skipped_count} 个segment")
+    logger.info(f"mcap文件: {mcap_path}")
+    logger.info(f"segments文件: {segments_json_path}")
+    logger.info(f"数据集保存位置: {lerobot_output_path}")
     
     # 更新处理记录
     if processed_count > 0:
         try:
             update_processed_files(mcap_path, segments_json_path, output_path, repo_name, in_lerobot=True)
-            logs.append(f"已更新处理记录")
+            logger.info("已更新处理记录")
         except Exception as e:
-            logs.append(f"警告: 更新处理记录失败: {e}")
+            logger.warning(f"更新处理记录失败: {e}")
     
-    return "\n".join(logs)
+    # 显示数据集统计信息
+    try:
+        if lerobot_output_path.exists():
+            # 重新加载数据集以获取统计信息
+            dataset_for_info = LeRobotDataset(repo_id=repo_name)
+            total_frames = len(dataset_for_info)
+            
+            # 尝试获取episode数量
+            try:
+                # LeRobotDataset可能有num_episodes属性，或者可以通过其他方式获取
+                if hasattr(dataset_for_info, 'num_episodes'):
+                    num_episodes = dataset_for_info.num_episodes
+                elif hasattr(dataset_for_info, 'info') and hasattr(dataset_for_info.info, 'num_episodes'):
+                    num_episodes = dataset_for_info.info.num_episodes
+                else:
+                    # 如果没有直接属性，尝试从数据目录统计episode目录数量
+                    episode_dirs = [d for d in lerobot_output_path.iterdir() 
+                                  if d.is_dir() and d.name.startswith('episode')]
+                    num_episodes = len(episode_dirs)
+                
+                logger.info("数据集统计信息:")
+                logger.info(f"  总帧数: {total_frames}")
+                logger.info(f"  Episode数量: {num_episodes}")
+            except Exception as e:
+                # 如果获取episode数量失败，至少显示总帧数
+                logger.info("数据集统计信息:")
+                logger.info(f"  总帧数: {total_frames}")
+                logger.warning(f"  无法获取episode数量: {e}")
+        else:
+            logger.info("数据集统计信息: 数据集目录不存在")
+    except Exception as e:
+        logger.warning(f"无法获取数据集统计信息: {e}")
+    
+    return f"处理完成：成功 {processed_count} 个，跳过 {skipped_count} 个"
 
 
 def main():
@@ -571,7 +666,7 @@ def main():
     
     args = parser.parse_args()
     
-    log = create_lerobot_dataset(
+    result = create_lerobot_dataset(
         args.mcap,
         args.segments,
         args.repo,
@@ -581,7 +676,9 @@ def main():
         args.action_type
     )
     
-    print(log)
+    # 结果已通过 logger 输出，这里只返回状态
+    if result:
+        logger.info(f"最终结果: {result}")
 
 
 if __name__ == '__main__':

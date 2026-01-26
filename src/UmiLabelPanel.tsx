@@ -127,16 +127,6 @@ function initCuts(startSec: number, endSec: number, nSubtasks: number): number[]
   return cuts;
 }
 
-/** keep cut relative positions when start/end changes */
-function remapCutsByRatio(oldStart: number, oldEnd: number, newStart: number, newEnd: number, cuts: number[]): number[] {
-  const oldDur = Math.max(oldEnd - oldStart, EPS);
-  const newDur = Math.max(newEnd - newStart, 0);
-  if (newDur < EPS) return [];
-  const us = cuts.map((c) => (c - oldStart) / oldDur);
-  const mapped = us.map((u) => newStart + u * newDur);
-  return mapped.slice().sort((a, b) => a - b);
-}
-
 /** derive subtasks from cuts and task defs */
 function buildSubtasksFromCuts(seg: SegmentRow, task?: TaskDef): SubSegment[] {
   const defs = task?.subtasks ?? [];
@@ -485,6 +475,7 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     };
   }
 
+
   function applyDragBoundary(segId: string, kind: "start" | "end", newTime: number) {
     setSegments((prev) => {
       const idx = prev.findIndex((s) => s.id === segId);
@@ -508,31 +499,18 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
 
       const t = clamp(newTime, minAllowed, maxAllowed);
 
-      const proposedStart = kind === "start" ? t : cur.startSec;
-      const proposedEnd = kind === "end" ? t : cur.endSec;
-
-      for (const o of sorted) {
-        if (o.id === segId) continue;
-        if (overlaps(proposedStart, proposedEnd, o.startSec, o.endSec)) return prev;
-      }
-
-      const oldStart = cur.startSec;
-      const oldEnd = cur.endSec;
-      const oldCuts = (cur.cutsSec ?? []).slice();
-
+      // 直接更新 startSec 或 endSec，而不需要创建 proposedStart 或 proposedEnd
       const updatedBase: SegmentRow = kind === "start" ? { ...cur, startSec: t } : { ...cur, endSec: t };
       const updatedNorm = normalizeRow(updatedBase);
 
-      const newCuts = remapCutsByRatio(oldStart, oldEnd, updatedNorm.startSec, updatedNorm.endSec, oldCuts)
-        .map((c) => clamp(c, updatedNorm.startSec + EPS, updatedNorm.endSec - EPS))
-        .slice()
-        .sort((a, b) => a - b);
-
+      // 只更新边界，不修改分割点
       const nextList = [...prev];
-      nextList[idx] = { ...updatedNorm, cutsSec: newCuts };
+      nextList[idx] = { ...updatedNorm };
       return nextList;
     });
   }
+
+
 
   function applyDragCut(segId: string, cutIndex: number, newTime: number) {
     setSegments((prev) => {

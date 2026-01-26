@@ -8,8 +8,10 @@ import json
 import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime
 import numpy as np
 import cv2
+import hashlib
 from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
@@ -25,6 +27,178 @@ except ImportError:
 from utils.load_mcap import read_mcap_file, read_pose_from_mcap, load_mcap_data
 from utils.load_json import load_segments_json, extract_segment_data
 from utils.data_sync import sync_topic_data
+
+
+def calculate_file_hash(file_path: str) -> str:
+    """
+    计算文件的SHA256哈希值
+    
+    Args:
+        file_path: 文件路径
+        
+    Returns:
+        文件的十六进制哈希值
+    """
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        # 分块读取，避免大文件占用过多内存
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+
+def get_processed_files_path(output_path: Optional[str], repo_name: str) -> Path:
+    """
+    获取处理记录JSON文件的路径
+    
+    Args:
+        output_path: 输出路径（可选）
+        repo_name: lerobot数据集repo名称
+        
+    Returns:
+        处理记录JSON文件的路径
+    """
+    if output_path is None:
+        base_path = HF_LEROBOT_HOME
+    else:
+        base_path = Path(output_path)
+    
+    return base_path / "processed_files.json"
+
+
+def load_processed_files(output_path: Optional[str], repo_name: str) -> Dict[str, Any]:
+    """
+    加载已处理文件记录
+    
+    Args:
+        output_path: 输出路径（可选）
+        repo_name: lerobot数据集repo名称
+        
+    Returns:
+        已处理文件记录的字典
+    """
+    processed_files_path = get_processed_files_path(output_path, repo_name)
+    
+    if not processed_files_path.exists():
+        return {}
+    
+    try:
+        with open(processed_files_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"警告: 无法读取处理记录文件 {processed_files_path}: {e}")
+        return {}
+
+
+def save_processed_files(
+    output_path: Optional[str],
+    repo_name: str,
+    processed_files: Dict[str, Any]
+) -> None:
+    """
+    保存已处理文件记录
+    
+    Args:
+        output_path: 输出路径（可选）
+        repo_name: lerobot数据集repo名称
+        processed_files: 已处理文件记录的字典
+    """
+    processed_files_path = get_processed_files_path(output_path, repo_name)
+    
+    # 确保目录存在
+    processed_files_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        with open(processed_files_path, 'w', encoding='utf-8') as f:
+            json.dump(processed_files, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"警告: 无法保存处理记录文件 {processed_files_path}: {e}")
+
+
+def check_already_processed(
+    mcap_path: str,
+    segments_json_path: str,
+    output_path: Optional[str],
+    repo_name: str
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """
+    检查文件组合是否已经处理过
+    
+    Args:
+        mcap_path: mcap文件路径
+        segments_json_path: segments.json文件路径
+        output_path: 输出路径（可选）
+        repo_name: lerobot数据集repo名称
+        
+    Returns:
+        (是否已处理, 处理记录信息)
+    """
+    # 计算文件哈希
+    try:
+        mcap_hash = calculate_file_hash(mcap_path)
+        segments_hash = calculate_file_hash(segments_json_path)
+    except Exception as e:
+        print(f"警告: 无法计算文件哈希: {e}")
+        return False, None
+    
+    # 组合哈希作为唯一标识
+    combined_hash = f"{mcap_hash}_{segments_hash}"
+    
+    # 加载处理记录
+    processed_files = load_processed_files(output_path, repo_name)
+    
+    # 检查是否已处理
+    if combined_hash in processed_files:
+        record = processed_files[combined_hash]
+        return True, record
+    
+    return False, None
+
+
+def update_processed_files(
+    mcap_path: str,
+    segments_json_path: str,
+    output_path: Optional[str],
+    repo_name: str,
+    in_lerobot: bool = True
+) -> None:
+    """
+    更新已处理文件记录
+    
+    Args:
+        mcap_path: mcap文件路径
+        segments_json_path: segments.json文件路径
+        output_path: 输出路径（可选）
+        repo_name: lerobot数据集repo名称
+        in_lerobot: 是否已经在lerobot数据集中
+    """
+    # 计算文件哈希
+    try:
+        mcap_hash = calculate_file_hash(mcap_path)
+        segments_hash = calculate_file_hash(segments_json_path)
+    except Exception as e:
+        print(f"警告: 无法计算文件哈希: {e}")
+        return
+    
+    # 组合哈希作为唯一标识
+    combined_hash = f"{mcap_hash}_{segments_hash}"
+    
+    # 加载现有记录
+    processed_files = load_processed_files(output_path, repo_name)
+    
+    # 更新记录
+    processed_files[combined_hash] = {
+        "mcap_path": mcap_path,
+        "segments_json_path": segments_json_path,
+        "mcap_hash": mcap_hash,
+        "segments_hash": segments_hash,
+        "repo_name": repo_name,
+        "in_lerobot": in_lerobot,
+        "processed_time": datetime.now().isoformat()  # 使用当前时间作为处理时间戳
+    }
+    
+    # 保存记录
+    save_processed_files(output_path, repo_name, processed_files)
 
 
 def print_topic_data_summary(topic_data: Dict[str, Dict[str, List[Tuple[float, Any]]]]):
@@ -71,6 +245,18 @@ def create_lerobot_dataset(
     
     if not os.path.isfile(segments_json_path):
         return f"错误: segments.json文件不存在: {segments_json_path}"
+    
+    # 检查是否已经处理过
+    already_processed, record = check_already_processed(mcap_path, segments_json_path, output_path, repo_name)
+    if already_processed and record:
+        if record.get('in_lerobot', False):
+            logs.append(f"文件组合已处理过，且已在lerobot数据集中，跳过处理")
+            logs.append(f"  mcap文件: {record.get('mcap_path', mcap_path)}")
+            logs.append(f"  segments文件: {record.get('segments_json_path', segments_json_path)}")
+            logs.append(f"  repo名称: {record.get('repo_name', repo_name)}")
+            return "\n".join(logs)
+        else:
+            logs.append(f"文件组合已处理过，但未在lerobot中，继续处理...")
     
     logs.append(f"读取mcap文件: {mcap_path}")
     logs.append(f"读取segments文件: {segments_json_path}")
@@ -186,6 +372,24 @@ def create_lerobot_dataset(
         import shutil
         shutil.rmtree(lerobot_output_path)
         logs.append(f"已清空已存在的数据集: {lerobot_output_path}")
+        
+        # 如果清空数据集，也清除相关的处理记录
+        try:
+            already_processed, record = check_already_processed(mcap_path, segments_json_path, output_path, repo_name)
+            if already_processed:
+                # 计算文件哈希
+                mcap_hash = calculate_file_hash(mcap_path)
+                segments_hash = calculate_file_hash(segments_json_path)
+                combined_hash = f"{mcap_hash}_{segments_hash}"
+                
+                # 加载并删除记录
+                processed_files = load_processed_files(output_path, repo_name)
+                if combined_hash in processed_files:
+                    del processed_files[combined_hash]
+                    save_processed_files(output_path, repo_name, processed_files)
+                    logs.append(f"已清除相关的处理记录")
+        except Exception as e:
+            logs.append(f"警告: 清除处理记录失败: {e}")
     
     # 创建或加载lerobot数据集
     lerobot_exists = lerobot_output_path.exists()
@@ -341,6 +545,14 @@ def create_lerobot_dataset(
     
     logs.append(f"\n完成！成功处理 {processed_count} 个segment，跳过 {skipped_count} 个segment")
     logs.append(f"数据集保存位置: {lerobot_output_path}")
+    
+    # 更新处理记录
+    if processed_count > 0:
+        try:
+            update_processed_files(mcap_path, segments_json_path, output_path, repo_name, in_lerobot=True)
+            logs.append(f"已更新处理记录")
+        except Exception as e:
+            logs.append(f"警告: 更新处理记录失败: {e}")
     
     return "\n".join(logs)
 

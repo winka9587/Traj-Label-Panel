@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "pick_cillion",
+      "name": "pick_cillion",
+      "prompt": "pick the bottle and put into the box",
+      "subtasks": [
+        { "id": "pick", "name": "pick", "prompt": "pick the bottle" },
+        { "id": "place", "name": "place", "prompt": "place the bottle into the box" },
+        { "id": "back", "name": "back", "prompt": "move back to base pose" }
+      ]
+    }
+  ]
+}

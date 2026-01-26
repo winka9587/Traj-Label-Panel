@@ -1,7 +1,9 @@
+# 不识别subtask，将整个task视为一个任务
 # 使用mcap文件和标签文件json（segments.json），生成lerobot数据集
 # 1. 读取mcap文件，提取画面和topic数据
 # 2. 读取每个mcap文件对应的标签文件json，提取整个mcap轨迹对应的多个segment的start和end时间戳
-# 3. 对每个segment，截取对应的画面和topic数据，保存为lerobot数据集格式
+# 3. 对于有subtasks的segment，使用第一个子任务的开始时间和最后一个子任务的结束时间
+# 4. 对每个segment，截取对应的画面和topic数据，保存为lerobot数据集格式
 
 import os
 import json
@@ -143,7 +145,7 @@ def save_processed_files(
     processed_files: Dict[str, Any]
 ) -> None:
     """
-    保存已处理文件记录
+    保存已处理文件记录（使用原子性写入）
     
     Args:
         output_path: 输出路径（可选）
@@ -155,25 +157,41 @@ def save_processed_files(
     # 确保目录存在
     processed_files_path.parent.mkdir(parents=True, exist_ok=True)
     
+    # 使用临时文件+原子重命名确保原子性写入
+    temp_path = processed_files_path.with_suffix('.tmp')
     try:
-        with open(processed_files_path, 'w', encoding='utf-8') as f:
+        with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(processed_files, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())  # 确保数据写入磁盘
+        
+        # 原子性重命名（在支持的系统上这是原子操作）
+        temp_path.replace(processed_files_path)
     except Exception as e:
         logger.warning(f"无法保存处理记录文件 {processed_files_path}: {e}")
+        # 清理临时文件
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except:
+                pass
+        raise
 
 
 def check_already_processed(
     mcap_path: str,
     segments_json_path: str,
+    segment_idx: int,
     output_path: Optional[str],
     repo_name: str
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """
-    检查文件组合是否已经处理过
+    检查特定的segment是否已经处理过
     
     Args:
         mcap_path: mcap文件路径
         segments_json_path: segments.json文件路径
+        segment_idx: segment索引
         output_path: 输出路径（可选）
         repo_name: lerobot数据集repo名称
         
@@ -181,7 +199,6 @@ def check_already_processed(
         (是否已处理, 处理记录信息)
     """
     # 计算文件哈希
-    logger.info("calculating file hashes for checking...")
     try:
         mcap_hash = calculate_file_hash(mcap_path)
         segments_hash = calculate_file_hash(segments_json_path)
@@ -189,37 +206,36 @@ def check_already_processed(
         logger.warning(f"无法计算文件哈希: {e}")
         return False, None
     
-    # 组合哈希作为唯一标识
-    combined_hash = f"{mcap_hash}_{segments_hash}"
+    # 组合哈希作为唯一标识（包含segment索引）
+    combined_hash = f"{mcap_hash}_{segments_hash}_{segment_idx}"
     
     # 加载处理记录
-    logger.info("loading processed files record...")
     processed_files = load_processed_files(output_path, repo_name)
     
-    logger.info("checking processed files...")
     # 检查是否已处理
     if combined_hash in processed_files:
         record = processed_files[combined_hash]
-        logger.info(f"found processed record: {record}")
+        logger.debug(f"找到已处理记录: segment {segment_idx}, {record}")
         return True, record
     
-    logger.info("no processed record found")
     return False, None
 
 
 def update_processed_files(
     mcap_path: str,
     segments_json_path: str,
+    segment_idx: int,
     output_path: Optional[str],
     repo_name: str,
     in_lerobot: bool = True
 ) -> None:
     """
-    更新已处理文件记录
+    更新已处理文件记录（针对特定segment）
     
     Args:
         mcap_path: mcap文件路径
         segments_json_path: segments.json文件路径
+        segment_idx: segment索引
         output_path: 输出路径（可选）
         repo_name: lerobot数据集repo名称
         in_lerobot: 是否已经在lerobot数据集中
@@ -230,10 +246,10 @@ def update_processed_files(
         segments_hash = calculate_file_hash(segments_json_path)
     except Exception as e:
         logger.warning(f"无法计算文件哈希: {e}")
-        return
+        raise
     
-    # 组合哈希作为唯一标识
-    combined_hash = f"{mcap_hash}_{segments_hash}"
+    # 组合哈希作为唯一标识（包含segment索引）
+    combined_hash = f"{mcap_hash}_{segments_hash}_{segment_idx}"
     
     # 加载现有记录
     processed_files = load_processed_files(output_path, repo_name)
@@ -242,6 +258,7 @@ def update_processed_files(
     processed_files[combined_hash] = {
         "mcap_path": mcap_path,
         "segments_json_path": segments_json_path,
+        "segment_idx": segment_idx,
         "mcap_hash": mcap_hash,
         "segments_hash": segments_hash,
         "repo_name": repo_name,
@@ -249,7 +266,7 @@ def update_processed_files(
         "processed_time": datetime.now().isoformat()  # 使用当前时间作为处理时间戳
     }
     
-    # 保存记录
+    # 保存记录（使用原子性写入）
     save_processed_files(output_path, repo_name, processed_files)
 
 
@@ -300,18 +317,6 @@ def create_lerobot_dataset(
         logger.error(error_msg)
         return error_msg
     
-    # 检查是否已经处理过
-    already_processed, record = check_already_processed(mcap_path, segments_json_path, output_path, repo_name)
-    if already_processed and record:
-        if record.get('in_lerobot', False):
-            logger.info("文件组合已处理过，且已在lerobot数据集中，跳过处理")
-            logger.info(f"  mcap文件: {record.get('mcap_path', mcap_path)}")
-            logger.info(f"  segments文件: {record.get('segments_json_path', segments_json_path)}")
-            logger.info(f"  repo名称: {record.get('repo_name', repo_name)}")
-            return "已跳过处理（文件已存在）"
-        else:
-            logger.info("文件组合已处理过，但未在lerobot中，继续处理...")
-    
     logger.info(f"读取mcap文件: {mcap_path}")
     logger.info(f"读取segments文件: {segments_json_path}")
     
@@ -333,7 +338,7 @@ def create_lerobot_dataset(
         return error_msg
     
     # 收集segment信息（用于后续处理）
-    segment_info_list = []  # 存储每个segment/subtask的信息
+    segment_info_list = []  # 存储每个segment的信息（不识别subtask）
     
     for idx, segment in enumerate(segments):
         start_sec = segment.get('startSec')
@@ -358,7 +363,11 @@ def create_lerobot_dataset(
                 'taskId': taskId,
             })
         else:
-            # 有subtasks，收集每个subtask的时间范围
+            # 有subtasks，不识别subtask，将整个task视为一个任务
+            # 使用第一个子任务的开始时间和最后一个子任务的结束时间
+            subtask_start_times = []
+            subtask_end_times = []
+            
             for subtask_meta in subtasks:
                 subtask_start_sec = subtask_meta.get('startSec', None)
                 subtask_end_sec = subtask_meta.get('endSec', None)
@@ -367,14 +376,19 @@ def create_lerobot_dataset(
                 if subtask_end_sec <= subtask_start_sec:
                     continue
                 
+                subtask_start_times.append(subtask_start_sec)
+                subtask_end_times.append(subtask_end_sec)
+            
+            if len(subtask_start_times) > 0:
+                # 使用第一个子任务的开始时间和最后一个子任务的结束时间
+                task_start_sec = min(subtask_start_times)
+                task_end_sec = max(subtask_end_times)
+                
                 segment_info_list.append({
-                    'type': 'subtask',
+                    'type': 'segment',
                     'segment_idx': idx,
-                    'subtaskId': subtask_meta.get('subtaskId', 'unknown'),
-                    'subtaskName': subtask_meta.get('subtaskName', 'unknown'),
-                    'subtask_prompt': subtask_meta.get('prompt', ''),
-                    'start_sec': subtask_start_sec,
-                    'end_sec': subtask_end_sec,
+                    'start_sec': task_start_sec,
+                    'end_sec': task_end_sec,
                     'prompt': prompt,
                     'taskId': taskId,
                 })
@@ -410,21 +424,23 @@ def create_lerobot_dataset(
         shutil.rmtree(lerobot_output_path)
         logger.info(f"已清空已存在的数据集: {lerobot_output_path}")
         
-        # 如果清空数据集，也清除相关的处理记录
+        # 如果清空数据集，也清除相关的处理记录（删除所有相关的segment记录）
         try:
-            already_processed, record = check_already_processed(mcap_path, segments_json_path, output_path, repo_name)
-            if already_processed:
-                # 计算文件哈希
-                mcap_hash = calculate_file_hash(mcap_path)
-                segments_hash = calculate_file_hash(segments_json_path)
-                combined_hash = f"{mcap_hash}_{segments_hash}"
-                
-                # 加载并删除记录
-                processed_files = load_processed_files(output_path, repo_name)
-                if combined_hash in processed_files:
-                    del processed_files[combined_hash]
-                    save_processed_files(output_path, repo_name, processed_files)
-                    logger.info("已清除相关的处理记录")
+            # 计算文件哈希
+            mcap_hash = calculate_file_hash(mcap_path)
+            segments_hash = calculate_file_hash(segments_json_path)
+            
+            # 加载并删除所有相关的segment记录
+            processed_files = load_processed_files(output_path, repo_name)
+            keys_to_delete = [
+                key for key in processed_files.keys() 
+                if key.startswith(f"{mcap_hash}_{segments_hash}_")
+            ]
+            if keys_to_delete:
+                for key in keys_to_delete:
+                    del processed_files[key]
+                save_processed_files(output_path, repo_name, processed_files)
+                logger.info(f"已清除 {len(keys_to_delete)} 条相关的处理记录")
         except Exception as e:
             logger.warning(f"清除处理记录失败: {e}")
     
@@ -472,23 +488,33 @@ def create_lerobot_dataset(
             image_writer_processes=5,
         )
     
-    # 处理每个segment/subtask
+    # 处理每个segment（不识别subtask，将整个task视为一个任务）
     processed_count = 0
     skipped_count = 0
     
     for seg_info in segment_info_list:
         start_sec = seg_info['start_sec']
         end_sec = seg_info['end_sec']
+        segment_idx = seg_info['segment_idx']
         
-        if seg_info['type'] == 'subtask':
-            log_prefix = f"Segment {seg_info['segment_idx']} Subtask {seg_info['subtaskId']}"
-        else:
-            log_prefix = f"Segment {seg_info['segment_idx']}"
+        log_prefix = f"Segment {segment_idx}"
+        
+        # 检查该segment是否已经处理过
+        already_processed, record = check_already_processed(
+            mcap_path, segments_json_path, segment_idx, output_path, repo_name
+        )
+        if already_processed and record:
+            if record.get('in_lerobot', False):
+                logger.info(f"{log_prefix}: 已处理过，跳过")
+                skipped_count += 1
+                continue
+            else:
+                logger.info(f"{log_prefix}: 已处理过但未在lerobot中，重新处理...")
         
         logger.info(f"处理{log_prefix}: {start_sec:.2f}s - {end_sec:.2f}s")
         
         try:
-            # 从已加载的数据中裁剪当前segment/subtask的时间范围
+            # 从已加载的数据中裁剪当前segment的时间范围
             segment_topic_data = {}
             for data_type, topics_data in all_topic_data.items():
                 segment_topic_data[data_type] = {}
@@ -553,24 +579,32 @@ def create_lerobot_dataset(
                 wrist_image_left = cv2.rotate(wrist_image_left, cv2.ROTATE_90_CLOCKWISE)
                 wrist_image_right = cv2.rotate(wrist_image_right, cv2.ROTATE_90_CLOCKWISE)
                 
-                # 构建task字符串
-                if seg_info['type'] == 'subtask':
-                    task_str = '{}-{}|{}-{}'.format(
-                        seg_info['taskId'], seg_info['prompt'],
-                        seg_info['subtaskId'], seg_info['subtask_prompt']
-                    )
-                else:
-                    task_str = '{}-{}'.format(seg_info['taskId'], seg_info['prompt'])
+                # 构建task字符串（不识别subtask，只使用task信息）
+                task_str = '{}-{}'.format(seg_info['taskId'], seg_info['prompt'])
                 
                 dataset.add_frame({
                     "wrist_image_left": wrist_image_left,
                     "wrist_image_right": wrist_image_right,
                     "state": state,
                     "actions": action,
-                    "task": task_str,  # 使用.split('|')[0].split('-')[-1]来获取task的总描述, .split('|')[-1].split('-')[-1]来获取subtask描述, 对于旧数据（仅有task）也兼容
+                    "task": task_str,  # 格式为 '{taskId}-{prompt}'，不包含subtask信息
                 })
             
+            # 保存episode
             dataset.save_episode()
+            
+            # 立即更新处理记录（确保原子性：save_episode成功后才更新记录）
+            try:
+                update_processed_files(
+                    mcap_path, segments_json_path, segment_idx, 
+                    output_path, repo_name, in_lerobot=True
+                )
+                logger.debug(f"{log_prefix}: 已更新处理记录")
+            except Exception as e:
+                # 如果更新记录失败，记录警告但不影响主流程
+                # 因为save_episode已经成功，数据已经保存
+                logger.warning(f"{log_prefix}: 更新处理记录失败: {e}")
+            
             processed_count += 1
             logger.info(f"{log_prefix}: 成功添加 {len(image_list)} 帧")
             
@@ -579,19 +613,14 @@ def create_lerobot_dataset(
             import traceback
             logger.error(traceback.format_exc())
             skipped_count += 1
+            # save_episode失败，不更新处理记录（保持原子性）
     
     logger.info(f"完成！成功处理 {processed_count} 个segment，跳过 {skipped_count} 个segment")
     logger.info(f"mcap文件: {mcap_path}")
     logger.info(f"segments文件: {segments_json_path}")
     logger.info(f"数据集保存位置: {lerobot_output_path}")
     
-    # 更新处理记录
-    if processed_count > 0:
-        try:
-            update_processed_files(mcap_path, segments_json_path, output_path, repo_name, in_lerobot=True)
-            logger.info("已更新处理记录")
-        except Exception as e:
-            logger.warning(f"更新处理记录失败: {e}")
+    # 注意：处理记录已在每个segment的save_episode后立即更新，这里不再需要整体更新
     
     # 显示数据集统计信息
     try:

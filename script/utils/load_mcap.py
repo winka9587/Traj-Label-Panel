@@ -273,9 +273,110 @@ def extract_joint_states_from_message(ros_msg: Any) -> Optional[np.ndarray]:
         return None
 
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
+
+def get_mcap_time_range(mcap_path: str, use_sampling: bool = False, sample_size: int = 1000) -> Tuple[float, float]:
+    """
+    获取mcap文件的时间范围（最小和最大时间戳）
+    
+    优化版本：仅读取时间戳元数据（不解码消息内容），大幅提升速度
+    
+    Args:
+        mcap_path: mcap文件路径
+        use_sampling: 是否使用采样方法（只读取前N个和后N个消息），默认False（完整遍历但不解码）
+        sample_size: 采样大小，每端读取的消息数量，默认1000（仅在use_sampling=True时使用）
+        
+    Returns:
+        (min_time, max_time): 最小和最大时间戳（秒）
+    """
+    if not MCAP_AVAILABLE:
+        raise ImportError("mcap库未安装，请安装: pip install mcap mcap-ros2-support")
+    
+    min_time = float('inf')
+    max_time = float('-inf')
+    
+    with open(mcap_path, "rb") as f:
+        # 不使用decoder factory，因为我们只需要时间戳，不需要解码消息内容
+        reader = make_reader(f)
+        
+        if use_sampling:
+            # 采样方法：只读取前N个和后N个消息的时间戳（更快但不一定准确）
+            timestamps = []
+            
+            for schema, channel, message in reader.iter_messages():
+                timestamp_ns = message.log_time if hasattr(message, 'log_time') else 0
+                timestamp_sec = timestamp_ns / 1e9
+                timestamps.append(timestamp_sec)
+            
+            if len(timestamps) == 0:
+                return (0.0, 0.0)
+            
+            # 如果消息数量少于采样大小，使用所有时间戳
+            if len(timestamps) <= sample_size * 2:
+                min_time = min(timestamps)
+                max_time = max(timestamps)
+            else:
+                # 取前N个和后N个时间戳
+                front_timestamps = timestamps[:sample_size]
+                back_timestamps = timestamps[-sample_size:]
+                all_sampled = front_timestamps + back_timestamps
+                min_time = min(all_sampled)
+                max_time = max(all_sampled)
+        else:
+            # 完整遍历但不解码（快速且准确）
+            # 只读取时间戳元数据，不解码消息内容，速度比iter_decoded_messages快很多
+            for schema, channel, message in reader.iter_messages():
+                timestamp_ns = message.log_time if hasattr(message, 'log_time') else 0
+                timestamp_sec = timestamp_ns / 1e9
+                
+                if timestamp_sec < min_time:
+                    min_time = timestamp_sec
+                if timestamp_sec > max_time:
+                    max_time = timestamp_sec
+    
+    if min_time == float('inf'):
+        return (0.0, 0.0)
+    
+    return (min_time, max_time)
+
+
+def create_time_progress_info(current_time: float,
+                              start_time: Optional[float] = None, end_time: Optional[float] = None,
+                              time_ranges: Optional[List[Tuple[float, float]]] = None) -> str:
+    """
+    创建时间信息字符串（简化版，不需要文件时间范围）
+    
+    Args:
+        current_time: 当前处理的时间戳（秒）
+        start_time: 开始时间（秒），None表示不限制（用于单个时间范围）
+        end_time: 结束时间（秒），None表示不限制（用于单个时间范围）
+        time_ranges: 多个时间范围列表，格式为 [(start1, end1), (start2, end2), ...]（优先级高于start_time/end_time）
+        
+    Returns:
+        时间信息字符串
+    """
+    time_info = f"时间: {current_time:.1f}s"
+    
+    if time_ranges is not None and len(time_ranges) > 0:
+        # 显示多个时间范围
+        range_strs = []
+        for range_start, range_end in time_ranges:
+            range_strs.append(f"{range_start:.1f}s-{range_end:.1f}s")
+        time_info += f" [范围: {', '.join(range_strs[:3])}"  # 最多显示前3个范围
+        if len(time_ranges) > 3:
+            time_info += f" ... ({len(time_ranges)}段)]"
+        else:
+            time_info += "]"
+    elif start_time is not None and end_time is not None:
+        # 显示单个时间范围
+        time_info += f" [范围: {start_time:.1f}s-{end_time:.1f}s]"
+    
+    return time_info
+
+
 def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optional[Dict[str, List[str]]] = None, 
-                   start_time: Optional[float] = None, end_time: Optional[float] = None) -> Dict:
+                   start_time: Optional[float] = None, end_time: Optional[float] = None,
+                   time_ranges: Optional[List[Tuple[float, float]]] = None) -> Dict:
     """
     读取mcap文件，提取图像和topic数据。
     如果提供了topic_list，会根据topic的类型直接提取相应的数据：
@@ -294,8 +395,10 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
                        "joint_states": ["/jbt_arm_R/current_arm_joint_state", ...],
                        "images": ["/gripper/camera_fisheye_l/color/image_raw", ...]
                    }
-        start_time: 可选，开始时间（秒），只加载此时间之后的数据
-        end_time: 可选，结束时间（秒），只加载此时间之前的数据
+        start_time: 可选，开始时间（秒），只加载此时间之后的数据（当time_ranges为None时使用）
+        end_time: 可选，结束时间（秒），只加载此时间之前的数据（当time_ranges为None时使用）
+        time_ranges: 可选，多个时间范围列表，格式为 [(start1, end1), (start2, end2), ...]。
+                     如果提供，只加载这些时间范围内的数据。优先级高于start_time/end_time
         
     Returns:
         如果提供了topic_list，返回格式为:
@@ -331,6 +434,14 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
         images = {}  # {topic_name: [(timestamp, image_data), ...]}
         topics = {}  # {topic_name: [(timestamp, message_data), ...]}
 
+    # 确定实际使用的时间范围（用于进度条显示）
+    display_start_time = start_time
+    display_end_time = end_time
+    if time_ranges is not None and len(time_ranges) > 0:
+        # 如果有多个时间范围，计算总体范围用于显示
+        display_start_time = min(r[0] for r in time_ranges)
+        display_end_time = max(r[1] for r in time_ranges)
+    
     with open(mcap_path, "rb") as f:
         # 创建reader并注册decoder factory
         reader = make_reader(f, decoder_factories=[Ros2DecoderFactory()])
@@ -341,11 +452,16 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
         
         # 如果启用进度条，使用tqdm包装
         if show_progress and TQDM_AVAILABLE:
-            pbar = tqdm(messages, desc="读取mcap文件", unit="消息", dynamic_ncols=True)
+            pbar = tqdm(messages, desc="读取mcap文件", unit=" 消息", dynamic_ncols=True)
         else:
             pbar = messages
         
         message_count = 0
+        skipped_before_start = 0
+        skipped_after_end = 0
+        consecutive_after_end = 0  # 连续超过end_time的消息数，用于提前退出
+        last_progress_update_time = 0  # 上次更新进度条的时间（用于减少更新频率）
+        
         for schema, channel, message, ros_msg in pbar:
             message_count += 1
             
@@ -353,11 +469,59 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
             timestamp_ns = message.log_time if hasattr(message, 'log_time') else 0
             timestamp_sec = timestamp_ns / 1e9
             
-            # 如果指定了时间范围，过滤数据
-            if start_time is not None and timestamp_sec < start_time:
+            # 检查时间戳是否在允许的时间范围内
+            in_time_range = False
+            
+            if time_ranges is not None:
+                # 使用多个时间范围（已按开始时间排序，且不重叠）
+                for range_start, range_end in time_ranges:
+                    # 如果时间戳小于当前范围的开始时间，可以提前退出
+                    # 因为后续范围的开始时间会更大（已排序且不重叠）
+                    if timestamp_sec < range_start:
+                        break
+                    # 如果时间戳在当前范围内，找到匹配
+                    if timestamp_sec <= range_end:
+                        in_time_range = True
+                        break
+                    # 如果时间戳大于当前范围的结束时间，继续检查下一个范围
+            else:
+                # 使用单个时间范围（start_time, end_time）
+                in_time_range = True
+                if start_time is not None and timestamp_sec < start_time:
+                    in_time_range = False
+                if end_time is not None and timestamp_sec > end_time:
+                    in_time_range = False
+            
+            # 如果不在时间范围内，跳过
+            if not in_time_range:
+                if time_ranges is not None:
+                    # 检查是在所有范围之前还是之后
+                    if len(time_ranges) > 0 and timestamp_sec < time_ranges[0][0]:
+                        skipped_before_start += 1
+                    elif len(time_ranges) > 0 and timestamp_sec > time_ranges[-1][1]:
+                        skipped_after_end += 1
+                        consecutive_after_end += 1
+                    else:
+                        # 在时间范围之间的间隙
+                        skipped_before_start += 1
+                else:
+                    # 使用单个时间范围
+                    if start_time is not None and timestamp_sec < start_time:
+                        skipped_before_start += 1
+                    elif end_time is not None and timestamp_sec > end_time:
+                        skipped_after_end += 1
+                        consecutive_after_end += 1
+                
+                # 更新可视化进度条（每0.1秒更新一次，减少开销）
+                if show_progress and TQDM_AVAILABLE:
+                    if timestamp_sec - last_progress_update_time > 0.1:
+                        time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
+                        pbar.set_postfix_str(time_info)
+                        last_progress_update_time = timestamp_sec
                 continue
-            if end_time is not None and timestamp_sec > end_time:
-                continue
+            
+            # 重置连续超过end_time的计数器（因为这条消息在时间范围内）
+            consecutive_after_end = 0
             
             topic_name = channel.topic
             
@@ -404,10 +568,17 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
                 # 更新进度条信息
                 if show_progress and TQDM_AVAILABLE:
                     counts = {k: len(v) for k, v in result.items()}
-                    pbar.set_postfix({
-                        **counts,
-                        '当前': topic_name[:30]
-                    })
+                    # 显示时间信息和统计数据
+                    if timestamp_sec - last_progress_update_time > 0.1:
+                        time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
+                        postfix = {**counts, '当前': topic_name[:30], '时间': time_info}
+                        pbar.set_postfix(postfix)
+                        last_progress_update_time = timestamp_sec
+                    else:
+                        pbar.set_postfix({
+                            **counts,
+                            '当前': topic_name[:30]
+                        })
             else:
                 # 传统模式：检查是否是图像消息（通过schema名称或topic名称）
                 is_image = False
@@ -425,11 +596,21 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
                         images[topic_name].append((timestamp_sec, img))
                         # 更新进度条信息
                         if show_progress and TQDM_AVAILABLE:
-                            pbar.set_postfix({
-                                '图像topics': len(images),
-                                '其他topics': len(topics),
-                                '当前': topic_name[:30]
-                            })
+                            if timestamp_sec - last_progress_update_time > 0.1:
+                                time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
+                                pbar.set_postfix({
+                                    '图像topics': len(images),
+                                    '其他topics': len(topics),
+                                    '当前': topic_name[:30],
+                                    '时间': time_info
+                                })
+                                last_progress_update_time = timestamp_sec
+                            else:
+                                pbar.set_postfix({
+                                    '图像topics': len(images),
+                                    '其他topics': len(topics),
+                                    '当前': topic_name[:30]
+                                })
                 else:
                     # 处理其他topic消息（如状态、动作等）
                     if topic_name not in topics:
@@ -438,11 +619,17 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
                     topics[topic_name].append((timestamp_sec, msg_data))
                     # 更新进度条信息
                     if show_progress and TQDM_AVAILABLE:
-                        pbar.set_postfix({
+                        postfix = {
                             '图像topics': len(images),
                             '其他topics': len(topics),
                             '当前': topic_name[:30]
-                        })
+                        }
+                        # 添加时间信息
+                        if timestamp_sec - last_progress_update_time > 0.1:
+                            time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
+                            postfix['时间'] = time_info
+                            last_progress_update_time = timestamp_sec
+                        pbar.set_postfix(postfix)
         
         # 检查是否读取到任何消息
         if message_count == 0:
@@ -451,6 +638,17 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
             print("  2. decoder factory 未正确注册")
             print("  3. 文件格式不兼容")
             print(f"  文件路径: {mcap_path}")
+        
+        # 打印时间范围过滤统计信息
+        if start_time is not None or end_time is not None:
+            total_processed = message_count
+            if start_time is not None:
+                print(f"时间范围过滤: 跳过了 {skipped_before_start} 条在开始时间之前的消息")
+            if end_time is not None:
+                print(f"时间范围过滤: 跳过了 {skipped_after_end} 条在结束时间之后的消息")
+            if total_processed > 0:
+                kept_ratio = (total_processed - skipped_before_start - skipped_after_end) / total_processed * 100
+                print(f"时间范围过滤: 保留了 {total_processed - skipped_before_start - skipped_after_end} / {total_processed} 条消息 ({kept_ratio:.1f}%)")
     
     # 返回相应的数据结构
     if topic_list is not None:
@@ -835,15 +1033,19 @@ def extract_joint_states_from_topic_data(topic_data: list, topic_name: str) -> l
 
 
 def load_mcap_data(mcap_path: str, topic_list: Dict[str, List[str]], 
-                   start_time: Optional[float] = None, end_time: Optional[float] = None) -> Dict[str, Dict[str, list]]:
+                   start_time: Optional[float] = None, end_time: Optional[float] = None,
+                   segments: Optional[List[Dict]] = None, buffer_seconds: float = 3.0) -> Dict[str, Dict[str, list]]:
     """
     从mcap文件中加载指定topic的数据，支持时间范围过滤
     
     Args:
         mcap_path: mcap文件路径
         topic_list: topic列表字典，key是数据类型，value是topic名称列表
-        start_time: 可选，开始时间（秒），只加载此时间之后的数据
-        end_time: 可选，结束时间（秒），只加载此时间之前的数据
+        start_time: 可选，开始时间（秒），只加载此时间之后的数据（当segments为None时使用）
+        end_time: 可选，结束时间（秒），只加载此时间之前的数据（当segments为None时使用）
+        segments: 可选，从JSON读取的segments列表，每个segment包含startSec和endSec字段。
+                  如果提供，将仅加载segments时间范围内的数据（前后冗余buffer_seconds秒）
+        buffer_seconds: 当使用segments时，在每个segment前后冗余加载的秒数，默认3.0秒
         
     Returns:
         加载后的数据字典
@@ -851,9 +1053,76 @@ def load_mcap_data(mcap_path: str, topic_list: Dict[str, List[str]],
     if not MCAP_AVAILABLE:
         raise ImportError("mcap库未安装 请安装: pip install mcap mcap-ros2-support")
     
-    # 直接使用read_mcap_file读取并提取数据
-    result = read_mcap_file(mcap_path, show_progress=True, topic_list=topic_list, 
-                           start_time=start_time, end_time=end_time)
+    # 如果提供了segments，计算需要加载的时间范围
+    if segments is not None:
+        time_ranges = []
+        
+        # 收集所有segment的时间范围（包括subtasks）
+        for segment in segments:
+            start_sec = segment.get('startSec')
+            end_sec = segment.get('endSec')
+            
+            if start_sec is None or end_sec is None:
+                continue
+            if end_sec <= start_sec:
+                continue
+            
+            # 检查是否有subtasks
+            subtasks = segment.get('subtasks', [])
+            if len(subtasks) == 0:
+                # 没有subtasks，使用segment本身
+                # 添加buffer：前后各冗余buffer_seconds秒
+                time_ranges.append((max(0, start_sec - buffer_seconds), end_sec + buffer_seconds))
+            else:
+                # 有subtasks，收集每个subtask的时间范围
+                for subtask_meta in subtasks:
+                    subtask_start_sec = subtask_meta.get('startSec', None)
+                    subtask_end_sec = subtask_meta.get('endSec', None)
+                    if subtask_start_sec is None or subtask_end_sec is None:
+                        continue
+                    if subtask_end_sec <= subtask_start_sec:
+                        continue
+                    
+                    # 添加buffer：前后各冗余buffer_seconds秒
+                    time_ranges.append((max(0, subtask_start_sec - buffer_seconds), subtask_end_sec + buffer_seconds))
+        
+        if not time_ranges:
+            raise ValueError("错误: segments中没有有效的时间范围")
+        
+        # 合并重叠的时间范围，计算需要加载的总时间范围
+        time_ranges.sort(key=lambda x: x[0])
+        merged_ranges = []
+        current_start, current_end = time_ranges[0]
+        
+        for start, end in time_ranges[1:]:
+            if start <= current_end:
+                # 重叠，合并
+                current_end = max(current_end, end)
+            else:
+                # 不重叠，保存当前范围，开始新的范围
+                merged_ranges.append((current_start, current_end))
+                current_start, current_end = start, end
+        merged_ranges.append((current_start, current_end))
+        
+        # 确保merged_ranges按开始时间排序（虽然合并算法已经保证有序，但显式排序更安全）
+        merged_ranges.sort(key=lambda x: x[0])
+        
+        # 计算总时间范围（仅用于显示）
+        overall_start = min(r[0] for r in merged_ranges)
+        overall_end = max(r[1] for r in merged_ranges)
+        total_duration = sum(r[1] - r[0] for r in merged_ranges)
+        
+        print(f"从segments计算得到 {len(merged_ranges)} 个时间片段，总时长: {total_duration:.2f}s")
+        print(f"时间范围: {overall_start:.2f}s - {overall_end:.2f}s (跨度 {overall_end - overall_start:.2f}s)")
+        print(f"每个segment前后冗余 {buffer_seconds} 秒")
+        
+        # 将merged_ranges传递给read_mcap_file，只加载这些片段内的数据
+        result = read_mcap_file(mcap_path, show_progress=True, topic_list=topic_list, 
+                               time_ranges=merged_ranges)
+    else:
+        # 没有提供segments，使用start_time和end_time
+        result = read_mcap_file(mcap_path, show_progress=True, topic_list=topic_list, 
+                               start_time=start_time, end_time=end_time)
     
     # 确保所有topic都有对应的数据（即使为空列表）
     for data_type, topics in topic_list.items():
@@ -869,9 +1138,9 @@ def load_mcap_data(mcap_path: str, topic_list: Dict[str, List[str]],
     for data_type, topics_data in result.items():
         for topic_name, data_list in topics_data.items():
             if len(data_list) > 1:
-                start_time = data_list[0][0]
-                end_time = data_list[-1][0]
-                time_span = end_time - start_time
+                actual_start_time = data_list[0][0]
+                actual_end_time = data_list[-1][0]
+                time_span = actual_end_time - actual_start_time
                 fps = len(data_list) / time_span if time_span > 0 else 0.0
                 print(f"已加载 {data_type} topic '{topic_name}'，数据量: {len(data_list)}，时间范围: {time_span:.2f}s，帧率: {fps:.2f} Hz")
             else:

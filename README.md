@@ -29,3 +29,6 @@ features:
 pip install mcap mcap-ros2-support
 ~~~
 
+## 注意
+
+目前的script中的脚本没有添加对 segments.json中重叠的处理（假设：一个json文件中的所有分段是不会出现重叠的）

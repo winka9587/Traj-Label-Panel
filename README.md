@@ -1,5 +1,7 @@
 # umi_cut
 
+参考: https://github.com/Lichtblick-Suite/create-lichtblick-extension
+
 ![](/assets/img/2026-01-26-15-01-38.png)
 
 Lichtblick extension，提供针对mcap格式遥操数据的标注插件
@@ -27,6 +29,28 @@ features:
 
 # script/gen_lerobot_dataset 依赖
 pip install mcap mcap-ros2-support
+~~~
+
+## install
+
+~~~
+npm run build
+npm run package　# 生成.foxe 
+~~~
+
+./dist下会生成extension.js
+
+foxe文件本质是一个压缩包，将其内容解压到~/.lichtblick-suite/extensions即可
+
+~~~
+~/.lichtblick-suite
+└── extensions
+    └── unknown.umi_cut-0.1.0
+        ├── CHANGELOG.md
+        ├── dist
+        │   └── extension.js
+        ├── package.json
+        └── README.md
 ~~~
 
 ## 注意

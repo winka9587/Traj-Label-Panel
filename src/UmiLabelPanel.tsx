@@ -115,6 +115,51 @@ function downloadJson(filename: string, obj: unknown) {
   URL.revokeObjectURL(url);
 }
 
+type ImportedSubtask = {
+  subtaskId: string;
+  name?: string;
+  startSec: number;
+  endSec: number;
+  prompt: string;
+};
+
+type ImportedSegment = {
+  startSec: number;
+  endSec: number;
+  prompt: string;
+  taskId?: string;
+  subtasks?: ImportedSubtask[];
+  // 兼容：如果你未来导出里也直接带 cutsSec，也能读
+  cutsSec?: number[];
+};
+
+type ImportedPayload = {
+  output_dir?: string;
+  source_name?: string;
+  task_config_version?: number;
+  segments?: ImportedSegment[];
+};
+
+function cutsFromImportedSegment(seg: ImportedSegment): number[] {
+  // 优先用 cutsSec（如果存在）
+  if (Array.isArray(seg.cutsSec) && seg.cutsSec.length) {
+    return seg.cutsSec.slice().sort((a, b) => a - b);
+  }
+
+  // 否则用 subtasks 的边界反推 cuts
+  const sts = seg.subtasks ?? [];
+  if (sts.length >= 2) {
+    // cuts = 每个 subtask 的 end（除最后一个）
+    const cuts = sts.slice(0, -1).map((st) => st.endSec);
+    return cuts
+      .map((c) => clamp(c, seg.startSec + EPS, seg.endSec - EPS))
+      .sort((a, b) => a - b);
+  }
+
+  return [];
+}
+
+
 /** equal init cuts (nSubtasks => nSubtasks-1 cuts) */
 function initCuts(startSec: number, endSec: number, nSubtasks: number): number[] {
   const nCuts = Math.max(nSubtasks - 1, 0);
@@ -199,6 +244,8 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<DragState>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
 
   // update prompt on task change (optional)
   useEffect(() => {
@@ -464,6 +511,68 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
   function removeRow(segId: string) {
     setSegments((prev) => prev.filter((s) => s.id !== segId));
   }
+  // for import json
+  function openImportDialog() {
+    fileInputRef.current?.click();
+  }
+
+  async function importSegmentsFromFile(file: File) {
+    try {
+      const text = await file.text();
+      const json = JSON.parse(text) as ImportedPayload;
+
+      const list = json.segments ?? [];
+      if (!Array.isArray(list) || list.length === 0) {
+        setStatus("导入失败：JSON 中没有 segments。");
+        return;
+      }
+
+      const rows: SegmentRow[] = list.map((s) => {
+        const startSec = Number(s.startSec);
+        const endSec = Number(s.endSec);
+        const prompt = (s.prompt ?? "").toString();
+
+        const cuts = cutsFromImportedSegment(s);
+
+        const row: SegmentRow = normalizeRow({
+          id: newId(),
+          startSec,
+          endSec,
+          prompt,
+          taskId: s.taskId,
+          cutsSec: cuts,
+        });
+
+        return row;
+      });
+
+      // 排序 + 基本重叠检查（可选：如果你希望强制无重叠）
+      const sorted = rows.sort((a, b) => a.startSec - b.startSec);
+
+      // 你也可以选择保留现有 segments 并 append；这里默认“覆盖加载”
+      setSegments(sorted);
+      setPendingStartSec(undefined);
+      setPendingCutsSec([]);
+
+      // 可选：同步 outputDir
+      if (typeof json.output_dir === "string" && json.output_dir.trim()) {
+        setOutputDir(json.output_dir.trim());
+      }
+
+      // 可选：把 task 下拉切到第一个 segment 的 taskId（如果存在且在 config 里）
+      const firstTaskId = sorted[0]?.taskId;
+      if (firstTaskId && taskConfig.tasks.some((t) => t.id === firstTaskId)) {
+        setSelectedTaskId(firstTaskId);
+      }
+
+      setStatus(`已导入 ${sorted.length} 个 segments：${file.name}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus(`导入失败：${msg}`);
+    }
+  }
+
+
 
   /** ===== Drag constraints ===== */
   function getNeighbors(segId: string, sorted: SegmentRow[]) {
@@ -767,6 +876,17 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
     setWindowSec((prev) => clamp(prev * factor, 2, 600));
   }
 
+  // import json
+  function onImportFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    void importSegmentsFromFile(file);
+
+    // 关键：清空 input value，否则同一个文件第二次选不会触发 change
+    e.target.value = "";
+  }
+
+
   /** ===== UI states ===== */
   const startDisabled = !canCreateAtCurrent() || pendingStartSec != null;
   const endDisabled = pendingStartSec == null || !canCreateAtCurrent();
@@ -907,6 +1027,15 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
           End @ currentTime
         </button>
         <button onClick={exportSegments}>Export JSON</button>
+          {/* NEW: Import */}
+        <button onClick={openImportDialog}>Import JSON</button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          style={{ display: "none" }}
+          onChange={onImportFileChange}
+        />
         <button onClick={clearAll} title="需要确认，防止误触">
           Clear
         </button>
@@ -1063,3 +1192,4 @@ export function initUmiLabelPanel(context: PanelExtensionContext): () => void {
 
   return () => root.unmount();
 }
+

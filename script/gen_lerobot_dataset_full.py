@@ -9,6 +9,7 @@ import os
 import json
 import argparse
 import logging
+import gc
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
@@ -400,17 +401,9 @@ def create_lerobot_dataset(
     
     logger.info(f"收集到 {len(segment_info_list)} 个有效的时间段")
     
-    # 一次性加载所有需要的数据（load_mcap_data会根据segments自动计算时间范围，并添加3秒冗余）
-    try:
-        logger.info("从mcap文件一次性加载数据（仅加载segments时间范围内的数据，前后冗余3秒）...")
-        all_topic_data = load_mcap_data(mcap_path, topic_list, 
-                                       segments=segments, 
-                                       buffer_seconds=3.0)
-        logger.info("数据加载完成")
-    except Exception as e:
-        error_msg = f"读取mcap文件失败: {e}"
-        logger.error(error_msg)
-        return error_msg
+    # 内存优化：不再一次性加载所有数据，改为按segment逐个加载
+    # 这样可以避免对于大文件（60GB+）导致内存爆炸
+    logger.info("使用内存优化模式：按segment逐个加载和处理数据")
     
     # 确定输出路径
     if output_path is None:
@@ -514,27 +507,51 @@ def create_lerobot_dataset(
         logger.info(f"处理{log_prefix}: {start_sec:.2f}s - {end_sec:.2f}s")
         
         try:
-            # 从已加载的数据中裁剪当前segment的时间范围
-            segment_topic_data = {}
-            for data_type, topics_data in all_topic_data.items():
-                segment_topic_data[data_type] = {}
+            # 内存优化：只为当前segment加载数据（前后冗余3秒）
+            logger.info(f"{log_prefix}: 从mcap文件加载数据（时间范围: {max(0, start_sec - 3.0):.2f}s - {end_sec + 3.0:.2f}s）...")
+            segment_topic_data = load_mcap_data(
+                mcap_path, 
+                topic_list, 
+                start_time=max(0, start_sec - 3.0),  # 前后冗余3秒
+                end_time=end_sec + 3.0,
+                segments=None  # 不使用segments参数，直接使用start_time和end_time
+            )
+            logger.info(f"{log_prefix}: 数据加载完成")
+            
+            # 裁剪到精确的时间范围（去除冗余部分）
+            logger.info(f"{log_prefix}: 裁剪数据到精确时间范围...")
+            cropped_topic_data = {}
+            for data_type, topics_data in segment_topic_data.items():
+                cropped_topic_data[data_type] = {}
                 for topic_name, data_list in topics_data.items():
                     # 过滤出当前时间范围内的数据
                     filtered_data = [(ts, data) for ts, data in data_list 
                                     if start_sec <= ts <= end_sec]
                     if filtered_data:
-                        segment_topic_data[data_type][topic_name] = filtered_data
+                        cropped_topic_data[data_type][topic_name] = filtered_data
+            
+            # 释放原始数据的内存
+            del segment_topic_data
+            gc.collect()
             
             # 对裁剪后的数据进行同步和插值
             logger.info(f"{log_prefix}: 开始数据同步&插值...")
-            segment_topic_data = sync_topic_data(segment_topic_data, time_diff_limit=0.03)
+            segment_topic_data = sync_topic_data(cropped_topic_data, time_diff_limit=0.03)
             print_topic_data_summary(segment_topic_data)
             logger.info(f"{log_prefix}: 数据同步&插值完成")
+            
+            # 释放裁剪数据的内存
+            del cropped_topic_data
+            gc.collect()
             
             # 提取segment数据
             image_list, state_list, timestamp_list = extract_segment_data(
                 segment_topic_data, start_sec, end_sec, fps
             )
+            
+            # 释放同步后的数据内存（提取后不再需要）
+            del segment_topic_data
+            gc.collect()
             
             if len(image_list) == 0:
                 logger.warning(f"{log_prefix}: 跳过，未提取到数据")
@@ -590,8 +607,17 @@ def create_lerobot_dataset(
                     "task": task_str,  # 格式为 '{taskId}-{prompt}'，不包含subtask信息
                 })
             
+            # 保存帧数（在释放内存之前）
+            num_frames = len(image_list)
+            
             # 保存episode
             dataset.save_episode()
+            
+            # 立即释放segment数据的内存
+            del image_list
+            del state_list
+            del timestamp_list
+            gc.collect()
             
             # 立即更新处理记录（确保原子性：save_episode成功后才更新记录）
             try:
@@ -606,7 +632,7 @@ def create_lerobot_dataset(
                 logger.warning(f"{log_prefix}: 更新处理记录失败: {e}")
             
             processed_count += 1
-            logger.info(f"{log_prefix}: 成功添加 {len(image_list)} 帧")
+            logger.info(f"{log_prefix}: 成功添加 {num_frames} 帧")
             
         except Exception as e:
             logger.error(f"{log_prefix}: 处理失败: {e}")

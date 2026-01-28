@@ -4,7 +4,7 @@
 
 ![](/assets/img/2026-01-26-15-01-38.png)
 
-Lichtblick extension，提供针对mcap格式遥操数据的标注插件
+Lichtblick extension，提供针对mcap格式录制数据的标注插件
 
 | 图标 | 说明 |
 |----------|----------|
@@ -20,7 +20,7 @@ features:
 3. :white_check_mark: 提供python数据处理脚本，加载mcap文件和json文件，生成处理后的lerobot数据
 4. :white_check_mark: 支持task+subtask预设
 5. :white_check_mark: 交互修改已生成的标注
-6. :construction: 加载已有json文件，检查/修改标注结果
+6. :white_check_mark: 加载已有json文件，检查/修改标注结果
 7. :black_square_button: 撤回上一个标注动作
 
 ## env

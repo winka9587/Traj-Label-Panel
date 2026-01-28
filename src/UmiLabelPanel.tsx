@@ -1027,7 +1027,6 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
           End @ currentTime
         </button>
         <button onClick={exportSegments}>Export JSON</button>
-          {/* NEW: Import */}
         <button onClick={openImportDialog}>Import JSON</button>
         <input
           ref={fileInputRef}
@@ -1065,7 +1064,17 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
       {/* Table */}
       <h3 style={{ margin: "0 0 8px" }}>Segments ({normalizedSegments.length})</h3>
 
-      <div style={{ maxHeight: tableMaxHeight, overflowY: "auto", border: "1px solid #eee", borderRadius: 6 }}>
+      {/* <div style={{ maxHeight: tableMaxHeight, overflowY: "auto", border: "1px solid #eee", borderRadius: 6 }}> */}
+      <div
+        style={{
+          maxHeight: tableMaxHeight,
+          overflowY: "auto",
+          overflowX: "auto", // NEW: 允许横向滚动
+          border: "1px solid #eee",
+          borderRadius: 6,
+          background: "#fff",
+        }}
+      >
         <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 980 }}>
           <thead style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1 }}>
             <tr>
@@ -1077,7 +1086,8 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
               <th style={thStyle}>Prompt</th>
               <th style={thStyle}>Cuts</th>
               <th style={thStyle}>Subtasks (derived)</th>
-              <th style={thStyle}>Actions</th>
+              {/* <th style={thStyle}>Actions</th> */}
+              <th style={{ ...thStyle, ...stickyRightTh }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1095,11 +1105,11 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
 
                 return (
                   <tr key={s.id}>
-                    <td style={tdStyle}>{idx}</td>
-                    <td style={tdStyle}>{s.startSec.toFixed(3)}</td>
-                    <td style={tdStyle}>{s.endSec.toFixed(3)}</td>
-                    <td style={tdStyle}>{(s.endSec - s.startSec).toFixed(3)}</td>
-                    <td style={tdStyle}>{taskName}</td>
+                    <td style={{ ...tdStyle, ...stickyRightTd, whiteSpace: "nowrap" }}>{idx}</td>
+                    <td style={{ ...tdStyle, ...stickyRightTd, whiteSpace: "nowrap" }}>{s.startSec.toFixed(3)}</td>
+                    <td style={{ ...tdStyle, ...stickyRightTd, whiteSpace: "nowrap" }}>{s.endSec.toFixed(3)}</td>
+                    <td style={{ ...tdStyle, ...stickyRightTd, whiteSpace: "nowrap" }}>{(s.endSec - s.startSec).toFixed(3)}</td>
+                    <td style={{ ...tdStyle, ...stickyRightTd, whiteSpace: "nowrap" }}>{taskName}</td>
                     <td style={{ ...tdStyle, wordBreak: "break-word" }}>{s.prompt}</td>
                     <td style={{ ...tdStyle, fontSize: 12, color: "#555" }}>
                       {(s.cutsSec ?? []).length ? (s.cutsSec ?? []).map((c) => c.toFixed(3)).join(", ") : "-"}
@@ -1128,14 +1138,19 @@ function UmiCropPanel({ context }: { context: PanelExtensionContext }): ReactEle
                         "-"
                       )}
                     </td>
-                    <td style={tdStyle}>
-                      <button onClick={() => seekTo(s.startSec)} disabled={!canSeek} style={{ marginRight: 8 }}>
+                    <td style={{ ...tdStyle, ...stickyRightTd, whiteSpace: "nowrap" }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <button onClick={() => seekTo(s.startSec)} disabled={!canSeek}>Start</button>
+                          <button onClick={() => seekTo(s.endSec)} disabled={!canSeek}>End</button>
+                          <button onClick={() => removeRow(s.id)}>Delete</button>
+                        </div>
+                      {/* <button onClick={() => seekTo(s.startSec)} disabled={!canSeek} style={{ marginRight: 8 }}>
                         Start
                       </button>
                       <button onClick={() => seekTo(s.endSec)} disabled={!canSeek} style={{ marginRight: 8 }}>
                         End
                       </button>
-                      <button onClick={() => removeRow(s.id)}>Delete</button>
+                      <button onClick={() => removeRow(s.id)}>Delete</button> */}
                     </td>
                   </tr>
                 );
@@ -1182,6 +1197,23 @@ const tdStyle: React.CSSProperties = {
   padding: "6px 8px",
   verticalAlign: "top",
 };
+// 避免按钮被遮挡
+const stickyRightTh: React.CSSProperties = {
+  position: "sticky",
+  right: 0,
+  zIndex: 3,
+  background: "#f6f6f6",
+  boxShadow: "-8px 0 8px rgba(0,0,0,0.03)",
+};
+
+const stickyRightTd: React.CSSProperties = {
+  position: "sticky",
+  right: 0,
+  zIndex: 2,
+  background: "#fff",
+  boxShadow: "-8px 0 8px rgba(0,0,0,0.03)",
+};
+
 
 export function initUmiLabelPanel(context: PanelExtensionContext): () => void {
   context.panelElement.style.pointerEvents = "auto";

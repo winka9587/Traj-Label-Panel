@@ -336,6 +336,10 @@ def create_lerobot_dataset(
     # 收集segment信息（用于后续处理）
     segment_info_list = []  # 存储每个segment/subtask的信息
     
+    # 使用有效segments的索引（从0开始），而不是原始segments列表中的索引
+    # 这样可以确保每个文件的segment索引都从0开始，即使前面的segments被跳过
+    valid_segment_idx = 0
+    
     for idx, segment in enumerate(segments):
         start_sec = segment.get('startSec')
         end_sec = segment.get('endSec')
@@ -352,14 +356,19 @@ def create_lerobot_dataset(
             # 没有subtasks，使用segment本身
             segment_info_list.append({
                 'type': 'segment',
-                'segment_idx': idx,
+                'segment_idx': valid_segment_idx,  # 使用有效segments的索引
                 'start_sec': start_sec,
                 'end_sec': end_sec,
                 'prompt': prompt,
                 'taskId': taskId,
             })
+            valid_segment_idx += 1  # 只有添加到列表中的segment才增加索引
         else:
             # 有subtasks，收集每个subtask的时间范围
+            # 所有subtasks共享同一个segment_idx
+            current_segment_idx = valid_segment_idx
+            has_valid_subtask = False
+            
             for subtask_meta in subtasks:
                 subtask_start_sec = subtask_meta.get('startSec', None)
                 subtask_end_sec = subtask_meta.get('endSec', None)
@@ -370,7 +379,7 @@ def create_lerobot_dataset(
                 
                 segment_info_list.append({
                     'type': 'subtask',
-                    'segment_idx': idx,
+                    'segment_idx': current_segment_idx,  # 使用有效segments的索引
                     'subtaskId': subtask_meta.get('subtaskId', 'unknown'),
                     'subtaskName': subtask_meta.get('subtaskName', 'unknown'),
                     'subtask_prompt': subtask_meta.get('prompt', ''),
@@ -379,6 +388,11 @@ def create_lerobot_dataset(
                     'prompt': prompt,
                     'taskId': taskId,
                 })
+                has_valid_subtask = True
+            
+            # 只有当至少有一个有效的subtask时，才增加segment索引
+            if has_valid_subtask:
+                valid_segment_idx += 1
     
     if not segment_info_list:
         error_msg = "错误: 没有有效的时间段"

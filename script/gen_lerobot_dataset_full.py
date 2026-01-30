@@ -341,6 +341,10 @@ def create_lerobot_dataset(
     # 收集segment信息（用于后续处理）
     segment_info_list = []  # 存储每个segment的信息（不识别subtask）
     
+    # 使用有效segments的索引（从0开始），而不是原始segments列表中的索引
+    # 这样可以确保每个文件的segment索引都从0开始，即使前面的segments被跳过
+    valid_segment_idx = 0
+    
     for idx, segment in enumerate(segments):
         start_sec = segment.get('startSec')
         end_sec = segment.get('endSec')
@@ -357,12 +361,13 @@ def create_lerobot_dataset(
             # 没有subtasks，使用segment本身
             segment_info_list.append({
                 'type': 'segment',
-                'segment_idx': idx,
+                'segment_idx': valid_segment_idx,  # 使用有效segments的索引
                 'start_sec': start_sec,
                 'end_sec': end_sec,
                 'prompt': prompt,
                 'taskId': taskId,
             })
+            valid_segment_idx += 1  # 只有添加到列表中的segment才增加索引
         else:
             # 有subtasks，不识别subtask，将整个task视为一个任务
             # 使用第一个子任务的开始时间和最后一个子任务的结束时间
@@ -387,12 +392,13 @@ def create_lerobot_dataset(
                 
                 segment_info_list.append({
                     'type': 'segment',
-                    'segment_idx': idx,
+                    'segment_idx': valid_segment_idx,  # 使用有效segments的索引
                     'start_sec': task_start_sec,
                     'end_sec': task_end_sec,
                     'prompt': prompt,
                     'taskId': taskId,
                 })
+                valid_segment_idx += 1  # 只有添加到列表中的segment才增加索引
     
     if not segment_info_list:
         error_msg = "错误: 没有有效的时间段"

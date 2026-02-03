@@ -11,10 +11,10 @@ GEN_SCRIPT="$SCRIPT_DIR/gen_lerobot_dataset_full.py"
 # ===== 环境变量 =====
 export TF_ENABLE_ONEDNN_OPTS=0
 export PYTHONUNBUFFERED=1   # 确保 Python 实时输出
-export HF_HOME="${HF_HOME:-/media/eiir/Extreme SSD}"  # HuggingFace 缓存目录，lerobot数据集会保存在此目录下
+export HF_HOME="${HF_HOME:-/media/eiir/Extreme SSD}"  # HuggingFace 缓存目录，生成的lerobot数据集会保存在此目录下
 
 # ===== 参数 =====
-ROOT_DIR="${1:-/media/eiir/Extreme SSD/raw_pika_gbt}"
+ROOT_DIR="${1:-/media/eiir/Extreme SSD/raw_pika_gbt}"  # 模型源目录
 REPO="${2:-pick_cillion_gbt_v2}"
 FPS="${3:-30}"
 

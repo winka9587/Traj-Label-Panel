@@ -140,6 +140,7 @@ def extract_segment_data(
 
     images = mcap_data.get('images', {})
     pose7d_data = mcap_data.get('pose7d', {})
+    gripper_data = mcap_data.get('gripper', {})
     
     # 确定采样时间点
     duration = end_sec - start_sec
@@ -159,14 +160,23 @@ def extract_segment_data(
     
     # 找到pose7d topic（用于提取状态）
     pose_topics = []
+    selected_gripper_topic = None
     if right_end_topic in pose7d_data:
         pose_topics.append(right_end_topic)
+        selected_gripper_topic = right_gripper_topic
     elif left_end_topic in pose7d_data:
         pose_topics.append(left_end_topic)
+        selected_gripper_topic = left_gripper_topic
     else:
         # 如果找不到指定的topic，使用第一个可用的
         if pose7d_data:
             pose_topics.append(list(pose7d_data.keys())[0])
+            # 尝试根据topic名称推断gripper topic
+            first_pose_topic = list(pose7d_data.keys())[0]
+            if 'R' in first_pose_topic or 'right' in first_pose_topic.lower():
+                selected_gripper_topic = right_gripper_topic
+            elif 'L' in first_pose_topic or 'left' in first_pose_topic.lower():
+                selected_gripper_topic = left_gripper_topic
     
     image_list = []
     state_list = []
@@ -213,6 +223,19 @@ def extract_segment_data(
             state = np.array(state, dtype=np.float32)
         if len(state) != 7:
             state = np.pad(state, (0, max(0, 7 - len(state))), 'constant')[:7]
+        
+        # 提取gripper值并填充到state的第7个元素（索引6）
+        if selected_gripper_topic and selected_gripper_topic in gripper_data:
+            gripper_value = interpolate_data(gripper_data[selected_gripper_topic], ts)
+            if gripper_value is not None:
+                if isinstance(gripper_value, np.ndarray):
+                    if len(gripper_value) > 0:
+                        state[6] = float(gripper_value[0])
+                elif isinstance(gripper_value, (list, tuple)):
+                    if len(gripper_value) > 0:
+                        state[6] = float(gripper_value[0])
+                else:
+                    state[6] = float(gripper_value)
         
         image_list.append(frame_images)
         state_list.append(state)

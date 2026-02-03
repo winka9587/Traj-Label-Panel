@@ -123,7 +123,7 @@ def interpolate_other_data(data_list: List[Tuple[float, Any]], target_time: floa
 
 
 def sync_topic_data(topic_data: Dict[str, Dict[str, List[Tuple[float, Any]]]], 
-                     time_diff_limit: float = 0.03) -> Dict[str, Dict[str, List[Tuple[float, Any]]]]:
+                     time_diff_limit: float = 0.003) -> Dict[str, Dict[str, List[Tuple[float, Any]]]]:
     """
     同步所有topic数据，以右手图像为主时间轴
     

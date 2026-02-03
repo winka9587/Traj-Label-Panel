@@ -16,7 +16,7 @@ export HF_HOME="${HF_HOME:-/media/eiir/Extreme SSD}"  # HuggingFace 缓存目录
 # ===== 参数 =====
 ROOT_DIR="${1:-/media/eiir/Extreme SSD/raw_pika_gbt}"
 REPO="${2:-pick_cillion_gbt}"
-FPS="${3:-50}"
+FPS="${3:-30}"
 
 # CLEAR_MODE:
 # 0 = never (default)

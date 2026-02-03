@@ -708,7 +708,7 @@ def extract_pose_from_msg(msg) -> np.ndarray:
         ]
     else:
         raise ValueError("cannot extract pose from topic")
-
+        
     return np.array(pose6d, dtype=np.float32)
 
 
@@ -857,23 +857,40 @@ def list_mcap_topics_from_data(mcap_data: dict) -> dict:
     return topic_info
 
 def quaternion_to_euler(qx, qy, qz, qw):
-    """将四元数转换为欧拉角（roll, pitch, yaw），单位：弧度"""
-    # 绕X轴旋转（roll）
-    sinr_cosp = 2 * (qw * qx + qy * qz)
-    cosr_cosp = 1 - 2 * (qx * qx + qy * qy)
-    roll = np.arctan2(sinr_cosp, cosr_cosp)
+    """将四元数转换为欧拉角（roll, pitch, yaw），单位：弧度
+    先转换为3x3旋转矩阵，再从旋转矩阵提取欧拉角"""
+    # 将四元数转换为3x3旋转矩阵
+    # 四元数 q = (qx, qy, qz, qw)
+    qx2 = qx * qx
+    qy2 = qy * qy
+    qz2 = qz * qz
+    qw2 = qw * qw
     
-    # 绕Y轴旋转（pitch）
-    sinp = 2 * (qw * qy - qz * qx)
+    # 旋转矩阵 R
+    R = np.array([
+        [1 - 2*(qy2 + qz2),     2*(qx*qy - qz*qw),     2*(qx*qz + qy*qw)],
+        [2*(qx*qy + qz*qw),     1 - 2*(qx2 + qz2),     2*(qy*qz - qx*qw)],
+        [2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw),     1 - 2*(qx2 + qy2)]
+    ])
+    
+    # 从旋转矩阵提取欧拉角（ZYX顺序：yaw-pitch-roll）
+    # R = [[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]]
+    r11, r12, r13 = R[0, 0], R[0, 1], R[0, 2]
+    r21, r22, r23 = R[1, 0], R[1, 1], R[1, 2]
+    r31, r32, r33 = R[2, 0], R[2, 1], R[2, 2]
+    
+    # 计算yaw（绕Z轴旋转）
+    yaw = np.arctan2(r21, r11)
+    
+    # 计算pitch（绕Y轴旋转）
+    sinp = -r31
     if abs(sinp) >= 1:
         pitch = np.copysign(np.pi / 2, sinp)
     else:
         pitch = np.arcsin(sinp)
     
-    # 绕Z轴旋转（yaw）
-    siny_cosp = 2 * (qw * qz + qx * qy)
-    cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
-    yaw = np.arctan2(siny_cosp, cosy_cosp)
+    # 计算roll（绕X轴旋转）
+    roll = np.arctan2(r32, r33)
     
     return np.array([roll, pitch, yaw])
 

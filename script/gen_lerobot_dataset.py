@@ -318,7 +318,8 @@ def create_lerobot_dataset(
     
     # key是type, value是topic列表
     topic_list = {
-        "pose7d": ["/jbt_arm_R/current_arm_end_pose", "/jbt_arm_L/current_arm_end_pose"],
+        # "pose7d": ["/jbt_arm_R/current_arm_end_pose", "/jbt_arm_L/current_arm_end_pose"],
+        "pose7d": ["/jbt_arm_R/current_arm_tcp_pose", "/jbt_arm_L/current_arm_tcp_pose"],
         "joint_states": ["/jbt_arm_R/current_arm_joint_state", "/jbt_arm_L/current_arm_joint_state"],
         "images": ["/gripper/camera_fisheye_l/color/image_raw", "/gripper/camera_fisheye_r/color/image_raw"],
         "gripper": ["/gripper/gripper_l/data", "/gripper/gripper_r/data"],
@@ -524,7 +525,7 @@ def create_lerobot_dataset(
             
             # 对裁剪后的数据进行同步和插值
             logger.info(f"{log_prefix}: 开始数据同步&插值...")
-            segment_topic_data = sync_topic_data(cropped_topic_data, time_diff_limit=0.03)
+            segment_topic_data = sync_topic_data(cropped_topic_data, time_diff_limit=0.003)
             print_topic_data_summary(segment_topic_data)
             logger.info(f"{log_prefix}: 数据同步&插值完成")
             
@@ -540,7 +541,7 @@ def create_lerobot_dataset(
             # 释放同步后的数据内存（提取后不再需要）
             del segment_topic_data
             gc.collect()
-            
+
             if len(image_list) == 0:
                 logger.warning(f"{log_prefix}: 跳过，未提取到数据")
                 skipped_count += 1
@@ -592,7 +593,7 @@ def create_lerobot_dataset(
                     )
                 else:
                     task_str = '{}-{}'.format(seg_info['taskId'], seg_info['prompt'])
-                
+                print('{}\n'.format(action[3:6]))
                 dataset.add_frame({
                     "wrist_image_left": wrist_image_left,
                     "wrist_image_right": wrist_image_right,
@@ -677,7 +678,7 @@ def main():
     parser.add_argument('--segments', type=str, required=True, help='segments.json文件路径')
     parser.add_argument('--repo', type=str, required=True, help='lerobot数据集repo名称')
     parser.add_argument('--output', type=str, default=None, help='输出路径（可选）')
-    parser.add_argument('--fps', type=int, default=50, help='目标帧率（默认50）')
+    parser.add_argument('--fps', type=int, default=30, help='目标帧率（默认50）')
     parser.add_argument('--clear', action='store_true', help='清空已存在的数据集')
     parser.add_argument('--action-type', type=str, default='current_state', 
                        choices=['current_state', 'next_state'],

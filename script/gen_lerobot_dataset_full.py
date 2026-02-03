@@ -323,7 +323,8 @@ def create_lerobot_dataset(
     
     # key是type, value是topic列表
     topic_list = {
-        "pose7d": ["/jbt_arm_R/current_arm_end_pose", "/jbt_arm_L/current_arm_end_pose"],
+        # "pose7d": ["/jbt_arm_R/current_arm_end_pose", "/jbt_arm_L/current_arm_end_pose"],
+        "pose7d": ["/jbt_arm_R/current_arm_tcp_pose", "/jbt_arm_L/current_arm_tcp_pose"],
         "joint_states": ["/jbt_arm_R/current_arm_joint_state", "/jbt_arm_L/current_arm_joint_state"],
         "images": ["/gripper/camera_fisheye_l/color/image_raw", "/gripper/camera_fisheye_r/color/image_raw"],
         "gripper": ["/gripper/gripper_l/data", "/gripper/gripper_r/data"],
@@ -542,7 +543,7 @@ def create_lerobot_dataset(
             
             # 对裁剪后的数据进行同步和插值
             logger.info(f"{log_prefix}: 开始数据同步&插值...")
-            segment_topic_data = sync_topic_data(cropped_topic_data, time_diff_limit=0.03)
+            segment_topic_data = sync_topic_data(cropped_topic_data, time_diff_limit=0.003)
             print_topic_data_summary(segment_topic_data)
             logger.info(f"{log_prefix}: 数据同步&插值完成")
             
@@ -572,12 +573,6 @@ def create_lerobot_dataset(
                 if action_type == 'current_state':
                     # 复制当前帧的state作为action
                     action = np.copy(state)
-                elif action_type == 'next_state':
-                    # 下一帧的state作为action
-                    if i + 1 < len(state_list):
-                        action = np.asarray(state_list[i + 1], np.float32)
-                    else:
-                        action = np.copy(state)
                 else:
                     raise ValueError(f"未知的action_type: {action_type}")
 
@@ -604,7 +599,7 @@ def create_lerobot_dataset(
                 
                 # 构建task字符串（不识别subtask，只使用task信息）
                 task_str = '{}-{}'.format(seg_info['taskId'], seg_info['prompt'])
-                
+                print('{}\n'.format(action[3:6]))
                 dataset.add_frame({
                     "wrist_image_left": wrist_image_left,
                     "wrist_image_right": wrist_image_right,

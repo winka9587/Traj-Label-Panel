@@ -356,21 +356,13 @@ def create_time_progress_info(current_time: float,
         时间信息字符串
     """
     time_info = f"时间: {current_time:.1f}s"
-    
-    if time_ranges is not None and len(time_ranges) > 0:
-        # 显示多个时间范围
-        range_strs = []
-        for range_start, range_end in time_ranges:
-            range_strs.append(f"{range_start:.1f}s-{range_end:.1f}s")
-        time_info += f" [范围: {', '.join(range_strs[:3])}"  # 最多显示前3个范围
-        if len(time_ranges) > 3:
-            time_info += f" ... ({len(time_ranges)}段)]"
-        else:
-            time_info += "]"
-    elif start_time is not None and end_time is not None:
-        # 显示单个时间范围
-        time_info += f" [范围: {start_time:.1f}s-{end_time:.1f}s]"
-    
+    if current_time < start_time:
+        time_info = 'skip'
+    elif current_time > end_time:
+        time_info = 'skip'
+    else:
+        progress_rate = (current_time - start_time)/(end_time - start_time)
+        time_info = f"时间进度: {progress_rate:.1%}"
     return time_info
 
 
@@ -452,7 +444,7 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
         
         # 如果启用进度条，使用tqdm包装
         if show_progress and TQDM_AVAILABLE:
-            pbar = tqdm(messages, desc="读取mcap文件", unit=" 消息", dynamic_ncols=True)
+            pbar = tqdm(messages, desc="Loading mcap[", unit="] data, time used:", dynamic_ncols=True)
         else:
             pbar = messages
         
@@ -566,19 +558,19 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
                     raise ValueError(f"Unknown data type: {data_type}")
 
                 # 更新进度条信息
-                if show_progress and TQDM_AVAILABLE:
-                    counts = {k: len(v) for k, v in result.items()}
-                    # 显示时间信息和统计数据
-                    if timestamp_sec - last_progress_update_time > 0.1:
-                        time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
-                        postfix = {**counts, '当前': topic_name[:30], '时间': time_info}
-                        pbar.set_postfix(postfix)
-                        last_progress_update_time = timestamp_sec
-                    else:
-                        pbar.set_postfix({
-                            **counts,
-                            '当前': topic_name[:30]
-                        })
+                # if show_progress and TQDM_AVAILABLE:
+                #     counts = {k: len(v) for k, v in result.items()}
+                #     # 显示时间信息和统计数据
+                #     if timestamp_sec - last_progress_update_time > 0.1:
+                #         time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
+                #         postfix = {**counts, '当前': topic_name[:30], '时间': time_info}
+                #         pbar.set_postfix(postfix)
+                #         last_progress_update_time = timestamp_sec
+                #     else:
+                #         pbar.set_postfix({
+                #             **counts,
+                #             '当前': topic_name[:30]
+                #         })
             else:
                 # 传统模式：检查是否是图像消息（通过schema名称或topic名称）
                 is_image = False
@@ -594,23 +586,23 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
                         if topic_name not in images:
                             images[topic_name] = []
                         images[topic_name].append((timestamp_sec, img))
-                        # 更新进度条信息
-                        if show_progress and TQDM_AVAILABLE:
-                            if timestamp_sec - last_progress_update_time > 0.1:
-                                time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
-                                pbar.set_postfix({
-                                    '图像topics': len(images),
-                                    '其他topics': len(topics),
-                                    '当前': topic_name[:30],
-                                    '时间': time_info
-                                })
-                                last_progress_update_time = timestamp_sec
-                            else:
-                                pbar.set_postfix({
-                                    '图像topics': len(images),
-                                    '其他topics': len(topics),
-                                    '当前': topic_name[:30]
-                                })
+                        # # 更新进度条信息
+                        # if show_progress and TQDM_AVAILABLE:
+                        #     if timestamp_sec - last_progress_update_time > 0.1:
+                        #         time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
+                        #         pbar.set_postfix({
+                        #             '图像topics': len(images),
+                        #             '其他topics': len(topics),
+                        #             '当前': topic_name[:30],
+                        #             '时间': time_info
+                        #         })
+                        #         last_progress_update_time = timestamp_sec
+                        #     else:
+                        #         pbar.set_postfix({
+                        #             '图像topics': len(images),
+                        #             '其他topics': len(topics),
+                        #             '当前': topic_name[:30]
+                        #         })
                 else:
                     # 处理其他topic消息（如状态、动作等）
                     if topic_name not in topics:
@@ -618,18 +610,18 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
                     msg_data = extract_message_data(ros_msg)
                     topics[topic_name].append((timestamp_sec, msg_data))
                     # 更新进度条信息
-                    if show_progress and TQDM_AVAILABLE:
-                        postfix = {
-                            '图像topics': len(images),
-                            '其他topics': len(topics),
-                            '当前': topic_name[:30]
-                        }
-                        # 添加时间信息
-                        if timestamp_sec - last_progress_update_time > 0.1:
-                            time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
-                            postfix['时间'] = time_info
-                            last_progress_update_time = timestamp_sec
-                        pbar.set_postfix(postfix)
+                    # if show_progress and TQDM_AVAILABLE:
+                    #     postfix = {
+                    #         '图像topics': len(images),
+                    #         '其他topics': len(topics),
+                    #         '当前': topic_name[:30]
+                    #     }
+                    #     # 添加时间信息
+                    #     if timestamp_sec - last_progress_update_time > 0.1:
+                    #         time_info = create_time_progress_info(timestamp_sec, display_start_time, display_end_time, time_ranges)
+                    #         postfix['时间'] = time_info
+                    #         last_progress_update_time = timestamp_sec
+                    #     pbar.set_postfix(postfix)
         
         # 检查是否读取到任何消息
         if message_count == 0:
@@ -1048,8 +1040,7 @@ def extract_joint_states_from_topic_data(topic_data: list, topic_name: str) -> l
     
     return joint_states
 
-
-def load_mcap_data(mcap_path: str, topic_list: Dict[str, List[str]], 
+def load_mcap_data(mcap_path: str, arm_topics,
                    start_time: Optional[float] = None, end_time: Optional[float] = None,
                    segments: Optional[List[Dict]] = None, buffer_seconds: float = 3.0) -> Dict[str, Dict[str, list]]:
     """
@@ -1057,7 +1048,7 @@ def load_mcap_data(mcap_path: str, topic_list: Dict[str, List[str]],
     
     Args:
         mcap_path: mcap文件路径
-        topic_list: topic列表字典，key是数据类型，value是topic名称列表
+        arm_topics: ArmTopics实例，包含所有关节的topic名称
         start_time: 可选，开始时间（秒），只加载此时间之后的数据（当segments为None时使用）
         end_time: 可选，结束时间（秒），只加载此时间之前的数据（当segments为None时使用）
         segments: 可选，从JSON读取的segments列表，每个segment包含startSec和endSec字段。
@@ -1070,6 +1061,7 @@ def load_mcap_data(mcap_path: str, topic_list: Dict[str, List[str]],
     if not MCAP_AVAILABLE:
         raise ImportError("mcap库未安装 请安装: pip install mcap mcap-ros2-support")
     
+    topic_list = arm_topics.to_topic_list()
     # 如果提供了segments，计算需要加载的时间范围
     if segments is not None:
         time_ranges = []
@@ -1130,16 +1122,29 @@ def load_mcap_data(mcap_path: str, topic_list: Dict[str, List[str]],
         total_duration = sum(r[1] - r[0] for r in merged_ranges)
         
         print(f"从segments计算得到 {len(merged_ranges)} 个时间片段，总时长: {total_duration:.2f}s")
-        print(f"时间范围: {overall_start:.2f}s - {overall_end:.2f}s (跨度 {overall_end - overall_start:.2f}s)")
+        print(f"ts range: {overall_start:.2f}s - {overall_end:.2f}s (range: {overall_end - overall_start:.2f}s)")
         print(f"每个segment前后冗余 {buffer_seconds} 秒")
         
         # 将merged_ranges传递给read_mcap_file，只加载这些片段内的数据
         result = read_mcap_file(mcap_path, show_progress=True, topic_list=topic_list, 
                                time_ranges=merged_ranges)
     else:
-        # 没有提供segments，使用start_time和end_time
-        result = read_mcap_file(mcap_path, show_progress=True, topic_list=topic_list, 
-                               start_time=start_time, end_time=end_time)
+        # 如果没有提供segments，使用start_time和end_time
+        if start_time is not None and end_time is not None:
+            if end_time <= start_time:
+                raise ValueError(f"错误: end_time ({end_time}) 必须大于 start_time ({start_time})")
+            
+            # 添加buffer：前后各冗余buffer_seconds秒
+            actual_start_time = max(0, start_time - buffer_seconds)
+            actual_end_time = end_time + buffer_seconds
+            
+            print(f"使用时间范围: {start_time:.2f}s - {end_time:.2f}s")
+            print(f"实际加载范围: {actual_start_time:.2f}s - {actual_end_time:.2f}s (前后冗余 {buffer_seconds} 秒)")
+            
+            result = read_mcap_file(mcap_path, show_progress=True, topic_list=topic_list,
+                                   start_time=actual_start_time, end_time=actual_end_time)
+        else:
+            raise ValueError("必须提供segments参数，或者同时提供start_time和end_time参数以加载mcap数据")
     
     # 确保所有topic都有对应的数据（即使为空列表）
     for data_type, topics in topic_list.items():
@@ -1147,7 +1152,7 @@ def load_mcap_data(mcap_path: str, topic_list: Dict[str, List[str]],
             result[data_type] = {}
         for topic_name in topics:
             if topic_name not in result[data_type]:
-                print(f"警告: 未找到{data_type} topic '{topic_name}'")
+                print(f"WARNNING: cannot found {data_type} topic '{topic_name}'")
                 result[data_type][topic_name] = []
     
     # 打印所有topic的数据量
@@ -1159,7 +1164,7 @@ def load_mcap_data(mcap_path: str, topic_list: Dict[str, List[str]],
                 actual_end_time = data_list[-1][0]
                 time_span = actual_end_time - actual_start_time
                 fps = len(data_list) / time_span if time_span > 0 else 0.0
-                print(f"已加载 {data_type} topic '{topic_name}'，数据量: {len(data_list)}，时间范围: {time_span:.2f}s，帧率: {fps:.2f} Hz")
+                print(f"Load {data_type} topic '{topic_name}', data size: {len(data_list)}, ts range: {time_span:.2f}s, FPS: {fps:.2f} Hz")
             else:
-                print(f"已加载 {data_type} topic '{topic_name}'，数据量: {len(data_list)}")
+                print(f"Load {data_type} topic '{topic_name}', data size: {len(data_list)}")
     return result

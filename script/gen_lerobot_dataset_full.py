@@ -12,6 +12,7 @@ import logging
 import gc
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
 import cv2
@@ -46,6 +47,64 @@ except ImportError:
 from utils.load_mcap import read_mcap_file, read_pose_from_mcap, load_mcap_data
 from utils.load_json import load_segments_json, extract_segment_data
 from utils.data_sync import sync_topic_data
+
+
+@dataclass
+class ArmTopics:
+    """
+    存储左右手的topic名称
+    
+    Attributes:
+        left_pose7d: 左手TCP位姿topic
+        right_pose7d: 右手TCP位姿topic
+        left_joint_states: 左手关节状态topic
+        right_joint_states: 右手关节状态topic
+        left_image: 左手图像topic
+        right_image: 右手图像topic
+        left_gripper: 左手夹爪topic
+        right_gripper: 右手夹爪topic
+    """
+    left_pose: str
+    right_pose: str
+    left_joint_states: str
+    right_joint_states: str
+    left_image: str
+    right_image: str
+    left_gripper: str
+    right_gripper: str
+    
+    def to_topic_list(self) -> Dict[str, List[str]]:
+        """
+        转换为topic_list格式（用于load_mcap_data等函数）
+        
+        Returns:
+            topic_list字典，格式为 {type: [topic1, topic2, ...]}
+        """
+        return {
+            "pose7d": [self.right_pose, self.left_pose],
+            "joint_states": [self.right_joint_states, self.left_joint_states],
+            "images": [self.left_image, self.right_image],
+            "gripper": [self.left_gripper, self.right_gripper],
+        }
+    
+    @classmethod
+    def default(cls) -> 'ArmTopics':
+        """
+        创建默认的topic配置
+        
+        Returns:
+            默认的ArmTopics实例
+        """
+        return cls(
+            left_pose="/jbt_arm_L/current_arm_tcp_pose",
+            right_pose="/jbt_arm_R/current_arm_tcp_pose",
+            left_joint_states="/jbt_arm_L/current_arm_joint_state",
+            right_joint_states="/jbt_arm_R/current_arm_joint_state",
+            left_image="/gripper/camera_fisheye_l/color/image_raw",
+            right_image="/gripper/camera_fisheye_r/color/image_raw",
+            left_gripper="/gripper/gripper_l/data",
+            right_gripper="/gripper/gripper_r/data",
+        )
 
 
 def calculate_file_hash(file_path: str) -> str:
@@ -184,7 +243,8 @@ def check_already_processed(
     segments_json_path: str,
     segment_idx: int,
     output_path: Optional[str],
-    repo_name: str
+    repo_name: str,
+    subtask_idx: Optional[int] = None
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """
     检查特定的segment是否已经处理过
@@ -195,6 +255,7 @@ def check_already_processed(
         segment_idx: segment索引
         output_path: 输出路径（可选）
         repo_name: lerobot数据集repo名称
+        subtask_idx: subtask索引（可选，用于sub_task模式）
         
     Returns:
         (是否已处理, 处理记录信息)
@@ -207,8 +268,11 @@ def check_already_processed(
         logger.warning(f"无法计算文件哈希: {e}")
         return False, None
     
-    # 组合哈希作为唯一标识（包含segment索引）
-    combined_hash = f"{mcap_hash}_{segments_hash}_{segment_idx}"
+    # 组合哈希作为唯一标识（包含segment索引和可选的subtask索引）
+    if subtask_idx is not None:
+        combined_hash = f"{mcap_hash}_{segments_hash}_{segment_idx}_{subtask_idx}"
+    else:
+        combined_hash = f"{mcap_hash}_{segments_hash}_{segment_idx}"
     
     # 加载处理记录
     processed_files = load_processed_files(output_path, repo_name)
@@ -216,7 +280,10 @@ def check_already_processed(
     # 检查是否已处理
     if combined_hash in processed_files:
         record = processed_files[combined_hash]
-        logger.debug(f"找到已处理记录: segment {segment_idx}, {record}")
+        if subtask_idx is not None:
+            logger.debug(f"找到已处理记录: segment {segment_idx}, subtask {subtask_idx}, {record}")
+        else:
+            logger.debug(f"找到已处理记录: segment {segment_idx}, {record}")
         return True, record
     
     return False, None
@@ -228,7 +295,8 @@ def update_processed_files(
     segment_idx: int,
     output_path: Optional[str],
     repo_name: str,
-    in_lerobot: bool = True
+    in_lerobot: bool = True,
+    subtask_idx: Optional[int] = None
 ) -> None:
     """
     更新已处理文件记录（针对特定segment）
@@ -240,6 +308,7 @@ def update_processed_files(
         output_path: 输出路径（可选）
         repo_name: lerobot数据集repo名称
         in_lerobot: 是否已经在lerobot数据集中
+        subtask_idx: subtask索引（可选，用于sub_task模式）
     """
     # 计算文件哈希
     try:
@@ -249,14 +318,17 @@ def update_processed_files(
         logger.warning(f"无法计算文件哈希: {e}")
         raise
     
-    # 组合哈希作为唯一标识（包含segment索引）
-    combined_hash = f"{mcap_hash}_{segments_hash}_{segment_idx}"
+    # 组合哈希作为唯一标识（包含segment索引和可选的subtask索引）
+    if subtask_idx is not None:
+        combined_hash = f"{mcap_hash}_{segments_hash}_{segment_idx}_{subtask_idx}"
+    else:
+        combined_hash = f"{mcap_hash}_{segments_hash}_{segment_idx}"
     
     # 加载现有记录
     processed_files = load_processed_files(output_path, repo_name)
     
     # 更新记录
-    processed_files[combined_hash] = {
+    record = {
         "mcap_path": mcap_path,
         "segments_json_path": segments_json_path,
         "segment_idx": segment_idx,
@@ -266,6 +338,12 @@ def update_processed_files(
         "in_lerobot": in_lerobot,
         "processed_time": datetime.now().isoformat()  # 使用当前时间作为处理时间戳
     }
+    
+    # 如果存在subtask_idx，添加到记录中
+    if subtask_idx is not None:
+        record["subtask_idx"] = subtask_idx
+    
+    processed_files[combined_hash] = record
     
     # 保存记录（使用原子性写入）
     save_processed_files(output_path, repo_name, processed_files)
@@ -279,9 +357,9 @@ def print_topic_data_summary(topic_data: Dict[str, Dict[str, List[Tuple[float, A
                 end_time = data_list[-1][0]
                 time_span = end_time - start_time
                 fps = len(data_list) / time_span if time_span > 0 else 0.0
-                logger.debug(f"已加载 {data_type} topic '{topic_name}'，数据量: {len(data_list)}，时间范围: {time_span:.2f}s，帧率: {fps:.2f} Hz")
+                logger.debug(f"Load {data_type} topic '{topic_name}', data size: {len(data_list)}, ts range: {time_span:.2f}s, FPS: {fps:.2f} Hz")
             else:
-                logger.debug(f"已加载 {data_type} topic '{topic_name}'，数据量: {len(data_list)}")
+                logger.debug(f"Load {data_type} topic '{topic_name}', data size: {len(data_list)}")
 
 
 def create_lerobot_dataset(
@@ -291,7 +369,9 @@ def create_lerobot_dataset(
     output_path: Optional[str] = None,
     fps: int = 50,
     clear_dataset: bool = False,
-    action_type: str = 'current_state'
+    action_type: str = 'current_state',
+    annotation_level: str = 'full_task',
+    available_subtask: Optional[List[str]] = None
 ) -> str:
     """
     从mcap文件和segments.json创建lerobot数据集
@@ -303,6 +383,9 @@ def create_lerobot_dataset(
         output_path: 输出路径（可选）
         fps: 目标帧率
         clear_dataset: 是否清空已存在的数据集
+        action_type: action类型
+        annotation_level: 标注模式，'full_task'（整个任务）或 'sub_task'（子任务）
+        available_subtask: 可用的子任务列表，例如 ['pick', 'place']
         
     Returns:
         处理日志
@@ -322,20 +405,22 @@ def create_lerobot_dataset(
     logger.info(f"读取segments文件: {segments_json_path}")
     
     # key是type, value是topic列表
-    topic_list = {
-        # "pose7d": ["/jbt_arm_R/current_arm_end_pose", "/jbt_arm_L/current_arm_end_pose"],
-        "pose7d": ["/jbt_arm_R/current_arm_tcp_pose", "/jbt_arm_L/current_arm_tcp_pose"],
-        "joint_states": ["/jbt_arm_R/current_arm_joint_state", "/jbt_arm_L/current_arm_joint_state"],
-        "images": ["/gripper/camera_fisheye_l/color/image_raw", "/gripper/camera_fisheye_r/color/image_raw"],
-        "gripper": ["/gripper/gripper_l/data", "/gripper/gripper_r/data"],
-    }
+    # topic_list = {
+    #     # "pose7d": ["/jbt_arm_R/current_arm_end_pose", "/jbt_arm_L/current_arm_end_pose"],
+    #     "pose7d": ["/jbt_arm_R/current_arm_tcp_pose", "/jbt_arm_L/current_arm_tcp_pose"],
+    #     "joint_states": ["/jbt_arm_R/current_arm_joint_state", "/jbt_arm_L/current_arm_joint_state"],
+    #     "images": ["/gripper/camera_fisheye_l/color/image_raw", "/gripper/camera_fisheye_r/color/image_raw"],
+    #     "gripper": ["/gripper/gripper_l/data", "/gripper/gripper_r/data"],
+    # }
+    arm_topics = ArmTopics.default()
+
     
     # 先读取segments.json，收集所有需要的时间范围
     try:
         segments = load_segments_json(segments_json_path)
-        logger.info(f"成功读取segments.json，找到 {len(segments)} 个segment")
+        logger.info(f"Successfully Load json file. Total {len(segments)} segments")
     except Exception as e:
-        error_msg = f"读取segments.json失败: {e}"
+        error_msg = f"Failed to load segments.json: {e}"
         logger.error(error_msg)
         return error_msg
     
@@ -345,61 +430,70 @@ def create_lerobot_dataset(
     # 使用有效segments的索引（从0开始），而不是原始segments列表中的索引
     # 这样可以确保每个文件的segment索引都从0开始，即使前面的segments被跳过
     valid_segment_idx = 0
+    valid_subtask_idx = 0
+    
+    # 验证 annotation_level 参数
+    if annotation_level not in ['full_task', 'sub_task']:
+        error_msg = f"错误: annotation_level 必须是 'full_task' 或 'sub_task'，当前值: {annotation_level}"
+        logger.error(error_msg)
+        return error_msg
+    
+    # 如果 annotation_level 是 sub_task，确保 available_subtask 不为空
+    if annotation_level == 'sub_task' and (available_subtask is None or len(available_subtask) == 0):
+        raise ValueError("annotation_level 为 'sub_task' 时，必须提供非空的 available_subtask 列表")
     
     for idx, segment in enumerate(segments):
-        start_sec = segment.get('startSec')
-        end_sec = segment.get('endSec')
         prompt = segment.get('prompt', '')
         taskId = segment.get('taskId', 'unknown')
-        
-        if start_sec is None or end_sec is None:
-            continue
-        if end_sec <= start_sec:
-            continue
-        
+        # 只有当没有子任务的时候, 才会使用segment的start和end
         subtasks = segment.get('subtasks', [])
-        if len(subtasks) == 0:
-            # 没有subtasks，使用segment本身
+        if len(subtasks) == 0 or len(available_subtask) == 0:
+            start_sec = segment.get('startSec')
+            end_sec = segment.get('endSec')
+            if start_sec is None or end_sec is None:
+                raise ValueError(f"segment的start和end不能为空: {segment}")
+            if end_sec <= start_sec:
+                raise ValueError(f"segment的end不能小于start: {segment}")
+        else:
+            # 使用available_subtask过滤子任务
+            subtasks = [subtask for subtask in subtasks if subtask.get('subtaskId') in available_subtask]
+            if not subtasks:
+                raise ValueError(f"segment的subtasks全部不在available_subtask中: {segment}")
+            start_sec = min(subtask.get('startSec', None) for subtask in subtasks)
+            end_sec = max(subtask.get('endSec', None) for subtask in subtasks)
+        
+        if annotation_level == 'full_task':
+            valid_segment_idx += 1  # 只有添加到列表中的segment才增加索引
+            # 添加主任务segment
             segment_info_list.append({
                 'type': 'segment',
                 'segment_idx': valid_segment_idx,  # 使用有效segments的索引
+                'subtask_idx': None,
                 'start_sec': start_sec,
                 'end_sec': end_sec,
                 'prompt': prompt,
                 'taskId': taskId,
+                'subtaskId': None,
             })
-            valid_segment_idx += 1  # 只有添加到列表中的segment才增加索引
-        else:
-            # 有subtasks，不识别subtask，将整个task视为一个任务
-            # 使用第一个子任务的开始时间和最后一个子任务的结束时间
-            subtask_start_times = []
-            subtask_end_times = []
             
-            for subtask_meta in subtasks:
-                subtask_start_sec = subtask_meta.get('startSec', None)
-                subtask_end_sec = subtask_meta.get('endSec', None)
-                if subtask_start_sec is None or subtask_end_sec is None:
+        elif annotation_level == 'sub_task':
+            # 添加子任务segment
+            for subtask in subtasks:
+                # 只有在available_subtask中才添加
+                if subtask.get('subtaskId') not in available_subtask:
                     continue
-                if subtask_end_sec <= subtask_start_sec:
-                    continue
-                
-                subtask_start_times.append(subtask_start_sec)
-                subtask_end_times.append(subtask_end_sec)
-            
-            if len(subtask_start_times) > 0:
-                # 使用第一个子任务的开始时间和最后一个子任务的结束时间
-                task_start_sec = min(subtask_start_times)
-                task_end_sec = max(subtask_end_times)
-                
+                valid_subtask_idx += 1
                 segment_info_list.append({
-                    'type': 'segment',
+                    'type': 'subtask',
                     'segment_idx': valid_segment_idx,  # 使用有效segments的索引
-                    'start_sec': task_start_sec,
-                    'end_sec': task_end_sec,
-                    'prompt': prompt,
+                    'subtask_idx': valid_subtask_idx,  # 使用有效子任务的索引
+                    'start_sec': subtask.get('startSec', None),
+                    'end_sec': subtask.get('endSec', None),
+                    'prompt': subtask.get('prompt', ''),
                     'taskId': taskId,
+                    'subtaskId': subtask.get('subtaskId'),
                 })
-                valid_segment_idx += 1  # 只有添加到列表中的segment才增加索引
+                
     
     if not segment_info_list:
         error_msg = "错误: 没有有效的时间段"
@@ -493,16 +587,26 @@ def create_lerobot_dataset(
     skipped_count = 0
     
     for seg_info in segment_info_list:
+        if annotation_level == 'sub_task' and seg_info['type'] != 'subtask':
+            continue
+        if annotation_level == 'full_task' and seg_info['type'] == 'subtask':
+            continue
         start_sec = seg_info['start_sec']
         end_sec = seg_info['end_sec']
         segment_idx = seg_info['segment_idx']
+        subtask_idx = seg_info.get('subtask_idx')
         
-        log_prefix = f"Segment {segment_idx}"
+        # 构建日志前缀
+        if subtask_idx is not None:
+            log_prefix = f"Segment {segment_idx}, Subtask {subtask_idx}/{len(segment_info_list)}"
+        else:
+            log_prefix = f"Segment {segment_idx}/{len(segment_info_list)}"
         
         # 检查该segment是否已经处理过
         already_processed, record = check_already_processed(
-            mcap_path, segments_json_path, segment_idx, output_path, repo_name
+            mcap_path, segments_json_path, segment_idx, output_path, repo_name, subtask_idx
         )
+        
         if already_processed and record:
             if record.get('in_lerobot', False):
                 logger.info(f"{log_prefix}: 已处理过，跳过")
@@ -516,47 +620,23 @@ def create_lerobot_dataset(
         try:
             # 内存优化：只为当前segment加载数据（前后冗余3秒）
             logger.info(f"{log_prefix}: 从mcap文件加载数据（时间范围: {max(0, start_sec - 3.0):.2f}s - {end_sec + 3.0:.2f}s）...")
+            # 不使用segments参数，直接使用start_time和end_time(因为当前for循环就是处理单个segment)
             segment_topic_data = load_mcap_data(
                 mcap_path, 
-                topic_list, 
-                start_time=max(0, start_sec - 3.0),  # 前后冗余3秒
+                arm_topics, 
+                start_time=max(0, start_sec - 3.0),  # 前后冗余3秒以便插值
                 end_time=end_sec + 3.0,
-                segments=None  # 不使用segments参数，直接使用start_time和end_time
+                segments=None  
             )
             logger.info(f"{log_prefix}: 数据加载完成")
             
-            # 裁剪到精确的时间范围（去除冗余部分）
-            logger.info(f"{log_prefix}: 裁剪数据到精确时间范围...")
-            cropped_topic_data = {}
-            for data_type, topics_data in segment_topic_data.items():
-                cropped_topic_data[data_type] = {}
-                for topic_name, data_list in topics_data.items():
-                    # 过滤出当前时间范围内的数据
-                    filtered_data = [(ts, data) for ts, data in data_list 
-                                    if start_sec <= ts <= end_sec]
-                    if filtered_data:
-                        cropped_topic_data[data_type][topic_name] = filtered_data
-            
-            # 释放原始数据的内存
-            del segment_topic_data
-            gc.collect()
-            
-            # 对裁剪后的数据进行同步和插值
+
+            # 对数据进行对齐和插值
             logger.info(f"{log_prefix}: 开始数据同步&插值...")
-            segment_topic_data = sync_topic_data(cropped_topic_data, time_diff_limit=0.003)
-            print_topic_data_summary(segment_topic_data)
+            timestamp_list, image_list, state_list = sync_topic_data(segment_topic_data, arm_topics, start_time=start_sec, end_time=end_sec, time_diff_limit=0.003)
             logger.info(f"{log_prefix}: 数据同步&插值完成")
             
-            # 释放裁剪数据的内存
-            del cropped_topic_data
-            gc.collect()
-            
-            # 提取segment数据
-            image_list, state_list, timestamp_list = extract_segment_data(
-                segment_topic_data, start_sec, end_sec, fps
-            )
-            
-            # 释放同步后的数据内存（提取后不再需要）
+            # 释放原始数据的内存
             del segment_topic_data
             gc.collect()
             
@@ -599,7 +679,7 @@ def create_lerobot_dataset(
                 
                 # 构建task字符串（不识别subtask，只使用task信息）
                 task_str = '{}-{}'.format(seg_info['taskId'], seg_info['prompt'])
-                print('{}\n'.format(action[3:6]))
+
                 dataset.add_frame({
                     "wrist_image_left": wrist_image_left,
                     "wrist_image_right": wrist_image_right,
@@ -624,7 +704,7 @@ def create_lerobot_dataset(
             try:
                 update_processed_files(
                     mcap_path, segments_json_path, segment_idx, 
-                    output_path, repo_name, in_lerobot=True
+                    output_path, repo_name, in_lerobot=True, subtask_idx=subtask_idx
                 )
                 logger.debug(f"{log_prefix}: 已更新处理记录")
             except Exception as e:
@@ -696,7 +776,12 @@ def main():
     parser.add_argument('--action-type', type=str, default='current_state', 
                        choices=['current_state', 'next_state'],
                        help='action类型：current_state（使用当前帧state）或next_state（使用下一帧state）')
-    
+    parser.add_argument('--annotation_level', type=str, default='full_task',
+                       choices=['full_task', 'sub_task'],
+                       help='标注模式：full_task（整个任务）或 sub_task（子任务）')
+    parser.add_argument('--available_subtask', type=str, nargs='*', default=None,
+                       help='可用的子任务列表，例如：--available_subtask pick place')
+
     args = parser.parse_args()
     
     result = create_lerobot_dataset(
@@ -706,7 +791,9 @@ def main():
         args.output,
         args.fps,
         args.clear,
-        args.action_type
+        args.action_type,
+        args.annotation_level,
+        args.available_subtask
     )
     
     # 结果已通过 logger 输出，这里只返回状态

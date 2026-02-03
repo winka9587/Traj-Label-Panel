@@ -37,7 +37,7 @@ class PoseTrajectoryInterpolator:
             assert np.all(times[1:] >= times[:-1])
 
             pos = poses[:,:3]
-            rot = st.Rotation.from_rotvec(poses[:,3:])
+            rot = st.Rotation.from_euler('ZYX', poses[:,3:])
 
             self.pos_interp = si.interp1d(times, pos, 
                 axis=0, assume_sorted=True)
@@ -58,7 +58,7 @@ class PoseTrajectoryInterpolator:
             n = len(self.times)
             poses = np.zeros((n, 6))
             poses[:,:3] = self.pos_interp.y
-            poses[:,3:] = self.rot_interp(self.times).as_rotvec()
+            poses[:,3:] = self.rot_interp(self.times).as_euler('ZYX')
             return poses
 
     def trim(self, 
@@ -201,7 +201,7 @@ class PoseTrajectoryInterpolator:
 
             pose = np.zeros((len(t), 6))
             pose[:,:3] = self.pos_interp(t)
-            pose[:,3:] = self.rot_interp(t).as_rotvec()
+            pose[:,3:] = self.rot_interp(t).as_euler('ZYX')
 
         if is_single:
             pose = pose[0]

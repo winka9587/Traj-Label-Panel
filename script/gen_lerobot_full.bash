@@ -15,7 +15,7 @@ export HF_HOME="${HF_HOME:-/media/eiir/Extreme SSD}"  # HuggingFace 缓存目录
 
 # ===== 参数 =====
 ROOT_DIR="${1:-/media/eiir/Extreme SSD/raw_pika_gbt}"
-REPO="${2:-pick_cillion_gbt}"
+REPO="${2:-pick_cillion_gbt_v2}"
 FPS="${3:-30}"
 
 # CLEAR_MODE:
@@ -23,6 +23,10 @@ FPS="${3:-30}"
 # 1 = first time only
 # 2 = every time
 CLEAR_MODE="${CLEAR_MODE:-0}"
+
+# 标注参数
+ANNOTATION_LEVEL="${ANNOTATION_LEVEL:-full_task}"
+AVAILABLE_SUBTASK="${AVAILABLE_SUBTASK:-pick place back}"
 
 # ===== 检查 =====
 [[ -x "$PYTHON_BIN" ]] || { echo "[ERROR] python not found: $PYTHON_BIN"; exit 1; }
@@ -33,6 +37,8 @@ echo "[INFO] ROOT_DIR=$ROOT_DIR"
 echo "[INFO] REPO=$REPO FPS=$FPS"
 echo "[INFO] HF_HOME=$HF_HOME"
 echo "[INFO] CLEAR_MODE=$CLEAR_MODE (0=never,1=first,2=always)"
+echo "[INFO] ANNOTATION_LEVEL=$ANNOTATION_LEVEL"
+echo "[INFO] AVAILABLE_SUBTASK=$AVAILABLE_SUBTASK"
 echo
 
 did_clear=0
@@ -92,7 +98,7 @@ for d in "${DIRS[@]}"; do
   esac
 
   echo "[RUN] command:"
-  echo "  $PYTHON_BIN $GEN_SCRIPT --mcap $mcap --segments $json --repo $REPO --fps $FPS ${clear_arg[*]}"
+  echo "  $PYTHON_BIN $GEN_SCRIPT --mcap $mcap --segments $json --repo $REPO --fps $FPS --annotation_level $ANNOTATION_LEVEL --available_subtask $AVAILABLE_SUBTASK ${clear_arg[*]}"
   echo
 
   # ===== 实时显示 Python 输出（stdout + stderr）=====
@@ -113,6 +119,8 @@ for d in "${DIRS[@]}"; do
     --segments "$json" \
     --repo "$REPO" \
     --fps "$FPS" \
+    --annotation_level "$ANNOTATION_LEVEL" \
+    --available_subtask $AVAILABLE_SUBTASK \
     "${clear_arg[@]}" 2>&1 | tee -a "$LOG_FILE"; then
     python_exit_code=${PIPESTATUS[0]}
     echo "[ERROR] Python script failed with exit code $python_exit_code" | tee -a "$LOG_FILE"

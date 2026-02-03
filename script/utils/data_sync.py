@@ -123,7 +123,9 @@ def interpolate_other_data(data_list: List[Tuple[float, Any]], target_time: floa
 
 
 def sync_topic_data(topic_data: Dict[str, Dict[str, List[Tuple[float, Any]]]], 
-                     time_diff_limit: float = 0.003) -> Dict[str, Dict[str, List[Tuple[float, Any]]]]:
+                    arm_topics,
+                    start_time: float, end_time: float,
+                    time_diff_limit: float = 0.003) -> Dict[str, Dict[str, List[Tuple[float, Any]]]]:
     """
     同步所有topic数据，以右手图像为主时间轴
     
@@ -139,10 +141,21 @@ def sync_topic_data(topic_data: Dict[str, Dict[str, List[Tuple[float, Any]]]],
     Returns:
         同步后的数据，格式相同
     """
+    topic_list = {
+        # "pose7d": ["/jbt_arm_R/current_arm_end_pose", "/jbt_arm_L/current_arm_end_pose"],
+        "pose7d": ["/jbt_arm_L/current_arm_tcp_pose", "/jbt_arm_R/current_arm_tcp_pose"],
+        "joint_states": ["/jbt_arm_L/current_arm_joint_state", "/jbt_arm_R/current_arm_joint_state"],
+        "images": ["/gripper/camera_fisheye_l/color/image_raw", "/gripper/camera_fisheye_r/color/image_raw"],
+        "gripper": ["/gripper/gripper_l/data", "/gripper/gripper_r/data"],
+    }
     # 找到右手图像topic（主时间轴）
-    right_image_topic = "/gripper/camera_fisheye_r/color/image_raw"
-    left_image_topic = "/gripper/camera_fisheye_l/color/image_raw"
-    
+    right_image_topic = arm_topics.right_image
+    left_image_topic = arm_topics.left_image
+    right_gripper_topic = arm_topics.right_gripper
+    left_gripper_topic = arm_topics.left_gripper
+    right_pose_topic = arm_topics.right_pose
+    left_tcp_topic = arm_topics.left_pose
+
     # 获取右手图像的时间戳列表作为主时间轴
     if 'images' not in topic_data or right_image_topic not in topic_data['images']:
         print("警告: 未找到右手图像topic，使用所有时间戳的并集")
@@ -156,7 +169,7 @@ def sync_topic_data(topic_data: Dict[str, Dict[str, List[Tuple[float, Any]]]],
     else:
         right_image_data = topic_data['images'][right_image_topic]
         master_timestamps = [ts for ts, _ in right_image_data]
-        print(f"以右手图像为主时间轴，共 {len(master_timestamps)} 个时间戳")
+        print(f"以右手图像为主时间轴, 当前segment包含 {len(master_timestamps)} 个时间戳")
     
     if not master_timestamps:
         return topic_data
@@ -167,9 +180,13 @@ def sync_topic_data(topic_data: Dict[str, Dict[str, List[Tuple[float, Any]]]],
         synced_data[data_type] = {}
         for topic_name in topic_data[data_type].keys():
             synced_data[data_type][topic_name] = []
-    
+    synced_data['ts'] = []
+    valid_count = 0
     # 对每个主时间戳进行同步
     for frame_time in master_timestamps:
+        if frame_time < start_time or frame_time > end_time:
+            # 跳过冗余时间段
+            continue
         # 处理右手图像（主时间轴，直接使用对应时间戳的数据）
         if 'images' in topic_data and right_image_topic in topic_data['images']:
             right_data_list = topic_data['images'][right_image_topic]
@@ -177,6 +194,7 @@ def sync_topic_data(topic_data: Dict[str, Dict[str, List[Tuple[float, Any]]]],
             closest_idx, closest_diff = find_closest_timestamp(right_data_list, frame_time)
             # 右手图像是主时间轴，应该总是有对应的数据
             synced_data['images'][right_image_topic].append(right_data_list[closest_idx])
+            synced_data['ts'].append(frame_time)
         
         # 处理左手图像（如果在time_diff_limit内有数据就用，否则插值）
         if 'images' in topic_data and left_image_topic in topic_data['images']:
@@ -216,6 +234,23 @@ def sync_topic_data(topic_data: Dict[str, Dict[str, List[Tuple[float, Any]]]],
                     
                     if interpolated_value is not None:
                         synced_data[data_type][topic_name].append((frame_time, interpolated_value))
-    
-    print(f"数据同步完成: 主时间轴 {len(master_timestamps)} 个时间戳")
-    return synced_data
+        valid_count += 1
+    print(f"当前segment对齐完成: 有效时间戳数量: {valid_count}/{len(master_timestamps)} ({valid_count/len(master_timestamps)})")
+
+    # 映射为list
+    images = synced_data.get('images', {})
+    pose7d_data = synced_data.get('pose7d', {})
+    gripper_data = synced_data.get('gripper', {})
+    ts_data = synced_data.get('ts', [])
+    # 将pose7d(6d)和gripper数据(1d)合并为一个7d向量
+    #image_list = # 将synced_data.get('images', {})左右两个key下的图像合并为tuple后组成list
+    timestamp_list = []
+    image_list = []
+    state_list = []
+    for i in range(len(images[right_image_topic])):
+        pose7d = pose7d_data[right_pose_topic][i][-1]
+        gripper = gripper_data[right_gripper_topic][i][-1]
+        timestamp_list.append(ts_data[i])
+        image_list.append((images[left_image_topic][i][-1], images[right_image_topic][i][-1]))
+        state_list.append(np.concatenate([pose7d, gripper]))
+    return timestamp_list, image_list, state_list

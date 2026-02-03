@@ -116,7 +116,7 @@ def extract_segment_data(
     mcap_data: Dict,
     start_sec: float,
     end_sec: float,
-    fps: int = 50
+    fps: int
 ) -> Tuple[List[np.ndarray], List[Dict], List[float]]:
     """
     从mcap数据中提取指定时间段的数据

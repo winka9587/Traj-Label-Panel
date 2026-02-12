@@ -624,9 +624,10 @@ def create_lerobot_dataset(
             segment_topic_data = load_mcap_data(
                 mcap_path, 
                 arm_topics, 
-                start_time=max(0, start_sec - 3.0),  # 前后冗余3秒以便插值
-                end_time=end_sec + 3.0,
-                segments=None  
+                start_time=max(0, start_sec),  
+                end_time=end_sec,
+                segments=None,
+                buffer_seconds=2.0   # 前后冗余2秒以便插值
             )
             logger.info(f"{log_prefix}: 数据加载完成")
             

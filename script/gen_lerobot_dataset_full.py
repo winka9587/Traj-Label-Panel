@@ -106,6 +106,72 @@ class ArmTopics:
             right_gripper="/gripper/gripper_r/data",
         )
 
+    @classmethod
+    def from_config_file(cls, config_path: str) -> 'ArmTopics':
+        """
+        从配置文件（JSON 或 YAML）加载 topic 配置，用于切换不同设备的 topic 名。
+        
+        Config 格式示例（JSON）:
+            {
+                "left_pose": "/jbt_arm_L/current_arm_tcp_pose",
+                "right_pose": "/jbt_arm_R/current_arm_tcp_pose",
+                "left_joint_states": "/jbt_arm_L/current_arm_joint_state",
+                "right_joint_states": "/jbt_arm_R/current_arm_joint_state",
+                "left_image": "/gripper/camera_fisheye_l/color/image_raw",
+                "right_image": "/gripper/camera_fisheye_r/color/image_raw",
+                "left_gripper": "/gripper/gripper_l/data",
+                "right_gripper": "/gripper/gripper_r/data"
+            }
+        
+        Args:
+            config_path: 配置文件路径（.json 或 .yaml/.yml）
+            
+        Returns:
+            ArmTopics 实例
+            
+        Raises:
+            FileNotFoundError: 配置文件不存在
+            ValueError: 缺少必填字段
+        """
+        path = Path(config_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"topic 配置文件不存在: {config_path}")
+        text = path.read_text(encoding="utf-8")
+        ext = path.suffix.lower()
+        if ext == ".json":
+            data = json.loads(text)
+        elif ext in (".yaml", ".yml"):
+            try:
+                import yaml
+                data = yaml.safe_load(text)
+            except ImportError:
+                raise ImportError("读取 YAML 需要安装 PyYAML: pip install pyyaml")
+        else:
+            # 尝试按 JSON 解析
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                raise ValueError(f"不支持的配置文件格式: {ext}，请使用 .json 或 .yaml")
+        if not isinstance(data, dict):
+            raise ValueError("配置文件根节点必须为对象")
+        required = [
+            "left_pose", "right_pose", "left_joint_states", "right_joint_states",
+            "left_image", "right_image", "left_gripper", "right_gripper",
+        ]
+        missing = [k for k in required if k not in data]
+        if missing:
+            raise ValueError(f"topic 配置文件缺少字段: {missing}")
+        return cls(
+            left_pose=str(data["left_pose"]),
+            right_pose=str(data["right_pose"]),
+            left_joint_states=str(data["left_joint_states"]),
+            right_joint_states=str(data["right_joint_states"]),
+            left_image=str(data["left_image"]),
+            right_image=str(data["right_image"]),
+            left_gripper=str(data["left_gripper"]),
+            right_gripper=str(data["right_gripper"]),
+        )
+
 
 def calculate_file_hash(file_path: str) -> str:
     """
@@ -371,7 +437,8 @@ def create_lerobot_dataset(
     clear_dataset: bool = False,
     action_type: str = 'current_state',
     annotation_level: str = 'full_task',
-    available_subtask: Optional[List[str]] = None
+    available_subtask: Optional[List[str]] = None,
+    topic_config_path: Optional[str] = None,
 ) -> str:
     """
     从mcap文件和segments.json创建lerobot数据集
@@ -386,6 +453,7 @@ def create_lerobot_dataset(
         action_type: action类型
         annotation_level: 标注模式，'full_task'（整个任务）或 'sub_task'（子任务）
         available_subtask: 可用的子任务列表，例如 ['pick', 'place']
+        topic_config_path: 可选，topic 配置文件路径（JSON/YAML），用于切换不同设备的 topic 名
         
     Returns:
         处理日志
@@ -404,15 +472,16 @@ def create_lerobot_dataset(
     logger.info(f"读取mcap文件: {mcap_path}")
     logger.info(f"读取segments文件: {segments_json_path}")
     
-    # key是type, value是topic列表
-    # topic_list = {
-    #     # "pose7d": ["/jbt_arm_R/current_arm_end_pose", "/jbt_arm_L/current_arm_end_pose"],
-    #     "pose7d": ["/jbt_arm_R/current_arm_tcp_pose", "/jbt_arm_L/current_arm_tcp_pose"],
-    #     "joint_states": ["/jbt_arm_R/current_arm_joint_state", "/jbt_arm_L/current_arm_joint_state"],
-    #     "images": ["/gripper/camera_fisheye_l/color/image_raw", "/gripper/camera_fisheye_r/color/image_raw"],
-    #     "gripper": ["/gripper/gripper_l/data", "/gripper/gripper_r/data"],
-    # }
-    arm_topics = ArmTopics.default()
+    # 加载 topic 配置：若指定了 topic_config_path 则从配置文件读取，否则使用默认
+    if topic_config_path:
+        try:
+            arm_topics = ArmTopics.from_config_file(topic_config_path)
+            logger.info(f"已从配置文件加载 topic: {topic_config_path}")
+        except Exception as e:
+            logger.error(f"加载 topic 配置失败: {e}")
+            return str(e)
+    else:
+        arm_topics = ArmTopics.default()
 
     
     # 先读取segments.json，收集所有需要的时间范围
@@ -782,6 +851,8 @@ def main():
                        help='标注模式：full_task（整个任务）或 sub_task（子任务）')
     parser.add_argument('--available_subtask', type=str, nargs='*', default=None,
                        help='可用的子任务列表，例如：--available_subtask pick place')
+    parser.add_argument('--config', type=str, default=None,
+                       help='topic 配置文件路径（JSON 或 YAML），用于切换不同设备的 topic 名')
 
     args = parser.parse_args()
     
@@ -794,7 +865,8 @@ def main():
         args.clear,
         args.action_type,
         args.annotation_level,
-        args.available_subtask
+        args.available_subtask,
+        args.config,
     )
     
     # 结果已通过 logger 输出，这里只返回状态

@@ -214,7 +214,7 @@ def sync_topic_data(topic_data: Dict[str, Dict[str, List[Tuple[float, Any]]]],
         print(f"以右手图像为主时间轴, 当前segment包含 {len(master_timestamps)} 个时间戳")
     
     if not master_timestamps:
-        return topic_data
+        return [], [], []
     
     # 初始化同步后的数据
     synced_data = {}

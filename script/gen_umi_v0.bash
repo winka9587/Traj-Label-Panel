@@ -29,9 +29,12 @@ export HF_HOME="${HF_HOME:-/media/eiir/Extreme SSD}"  # HuggingFace 缓存目录
 # 例：gen_umi_v0.bash /path/to/root1
 # 例：gen_umi_v0.bash /path/to/root1 /path/to/root2
 # 例：gen_umi_v0.bash /path/to/root1 /path/to/root2 pick_cillion_umi_v0 30
+
+# raw数据目录
 BASE="/media/eiir/Extreme SSD/umi_raw_data_part2"
+# 可通过注释快速启用/关闭
 DEFAULT_ROOT_DIRS=(
-  "$BASE/pika_data"
+  "$BASE/pika_data"  
   "$BASE/pika_data_2/dataset_1"
   "$BASE/pika_data_2/dataset_2"
 )

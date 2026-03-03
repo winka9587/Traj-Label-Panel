@@ -439,6 +439,7 @@ def create_lerobot_dataset(
     annotation_level: str = 'full_task',
     available_subtask: Optional[List[str]] = None,
     topic_config_path: Optional[str] = None,
+    skip_final_stats: bool = False,
 ) -> str:
     """
     从mcap文件和segments.json创建lerobot数据集
@@ -611,7 +612,7 @@ def create_lerobot_dataset(
     lerobot_exists = lerobot_output_path.exists()
     if lerobot_exists:
         logger.info(f"数据集已存在，追加新episode: {lerobot_output_path}")
-        dataset = LeRobotDataset(repo_id=repo_name)
+        dataset = LeRobotDataset(repo_id=repo_name, gen_split=False)
         dataset.start_image_writer(
             num_processes=5,
             num_threads=10,
@@ -799,41 +800,23 @@ def create_lerobot_dataset(
     
     # 注意：处理记录已在每个segment的save_episode后立即更新，这里不再需要整体更新
     
-    # 显示数据集统计信息
-    try:
-        if lerobot_output_path.exists():
-            # 重新加载数据集以获取统计信息
-            dataset_for_info = LeRobotDataset(repo_id=repo_name)
-            total_frames = len(dataset_for_info)
-            
-            # 尝试获取episode数量
-            try:
-                # LeRobotDataset可能有num_episodes属性，或者可以通过其他方式获取
-                if hasattr(dataset_for_info, 'num_episodes'):
-                    num_episodes = dataset_for_info.num_episodes
-                elif hasattr(dataset_for_info, 'info') and hasattr(dataset_for_info.info, 'num_episodes'):
-                    num_episodes = dataset_for_info.info.num_episodes
-                else:
-                    # 如果没有直接属性，尝试从数据目录统计episode目录数量
-                    episode_dirs = [d for d in lerobot_output_path.iterdir() 
-                                  if d.is_dir() and d.name.startswith('episode')]
-                    num_episodes = len(episode_dirs)
-                
-                logger.info("数据集统计信息:")
-                logger.info(f"  总帧数: {total_frames}")
-                logger.info(f"  Episode数量: {num_episodes}")
-            except Exception as e:
-                # 如果获取episode数量失败，至少显示总帧数
-                logger.info("数据集统计信息:")
-                logger.info(f"  总帧数: {total_frames}")
-                logger.warning(f"  无法获取episode数量: {e}")
-        else:
-            logger.info("数据集统计信息: 数据集目录不存在")
-    except Exception as e:
-        logger.warning(f"无法获取数据集统计信息: {e}")
-    
     return f"处理完成：成功 {processed_count} 个，跳过 {skipped_count} 个"
 
+def stat_lerobot_dataset(lerobot_output_path: Path, repo_name: str):
+    if lerobot_output_path.exists():
+        dataset_for_info = LeRobotDataset(repo_id=repo_name, gen_split=False)
+        total_frames = len(dataset_for_info)
+        
+        # 尝试获取episode数量
+        try:
+            num_episodes = dataset_for_info.num_episodes
+        except Exception as e:
+            num_episodes = len([d for d in lerobot_output_path.iterdir() if d.is_dir() and d.name.startswith('episode')])
+        logger.info("数据集统计信息:")
+        logger.info(f"  总帧数: {total_frames}")
+        logger.info(f"  Episode数量: {num_episodes}")
+    else:
+        logger.info("数据集目录不存在")
 
 def main():
     parser = argparse.ArgumentParser(description='从mcap文件和segments.json生成lerobot数据集')
@@ -868,6 +851,8 @@ def main():
         args.available_subtask,
         args.config,
     )
+
+    # stat_lerobot_dataset(Path(args.output) / args.repo, args.repo)
     
     # 结果已通过 logger 输出，这里只返回状态
     if result:

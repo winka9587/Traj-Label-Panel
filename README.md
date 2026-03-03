@@ -57,6 +57,31 @@ foxe文件本质是一个压缩包，将其内容解压到~/.lichtblick-suite/ex
 
 目前的script中的脚本没有添加对 segments.json中重叠的处理（假设：一个json文件中的所有分段是不会出现重叠的）
 
+### 关于 `lerobot-edit-dataset` 与删除 episode
+
+文档中的删除示例：
+
+```bash
+lerobot-edit-dataset --repo_id lerobot/pusht --operation.type delete_episodes --operation.episode_indices "[0, 2, 5]"
+```
+
+**该命令仅在 lerobot 0.4+ 中提供。** 若你当前是 `lerobot 0.1.0`（`pip list | grep lerobot`），则不会包含 `lerobot-edit-dataset`，因此会报「未找到命令」。
+
+可选做法：
+
+1. **升级 lerobot 后使用官方命令**（推荐，若可接受升级）：
+   ```bash
+   pip install -U lerobot
+   lerobot-edit-dataset --repo_id <你的repo_id> --operation.type delete_episodes --operation.episode_indices "[0, 2, 5]"
+   ```
+   若数据集在本地，可加 `--root /path/to/HF_LEROBOT_HOME`。
+
+2. **不升级时**：使用本仓库提供的脚本（会检测是否有 `lerobot-edit-dataset`，没有则提示升级）：
+   ```bash
+   cd script && python delete_episodes_lerobot.py --repo_id pick_cillion_umi_v0 --episode_indices "[0, 2, 5]"
+   ```
+   **注意**：在 0.1.0 下该脚本只会提示升级，不会执行删除；升级到 0.4+ 后同一命令会调用官方工具执行删除。
+
 ## 
 
 ~~~

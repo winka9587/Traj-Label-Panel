@@ -429,6 +429,8 @@ def read_mcap_file(mcap_path: str, show_progress: bool = True, topic_list: Optio
     # 确定实际使用的时间范围（用于进度条显示）
     display_start_time = start_time
     display_end_time = end_time
+
+    # print(f"len(time_ranges): {len(time_ranges)}")
     if time_ranges is not None and len(time_ranges) > 0:
         # 如果有多个时间范围，计算总体范围用于显示
         display_start_time = min(r[0] for r in time_ranges)

@@ -53,6 +53,14 @@ foxe文件本质是一个压缩包，将其内容解压到~/.lichtblick-suite/ex
         └── README.md
 ~~~
 
+添加了对lerobot的修改来跳过split生成，加速数据集的本地构建。如果需要该功能，拉取并使用修改后的lerobot：
+~~~
+git clone git@github.com:winka9587/lerobot-for-DataGen.git
+cd lerobot-for-DataGen
+pip install -e .
+~~~
+
+
 ## 注意
 
 目前的script中的脚本没有添加对 segments.json中重叠的处理（假设：一个json文件中的所有分段是不会出现重叠的）
